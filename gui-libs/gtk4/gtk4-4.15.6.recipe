@@ -62,7 +62,6 @@ REQUIRES="
         gsettings_desktop_schemas$secondaryArchSuffix
         shared_mime_info$secondaryArchSuffix
         graphene$secondaryArchSuffix
-        gstreamer$secondaryArchSuffix
         lib:libatk_1.0$secondaryArchSuffix
         lib:libcairo$secondaryArchSuffix
         lib:libcairo_gobject$secondaryArchSuffix
@@ -75,8 +74,6 @@ REQUIRES="
         lib:libglib_2.0$secondaryArchSuffix
         lib:libGL$secondaryArchSuffix
         lib:libgraphene_1.0$secondaryArchSuffix
-        lib:libgstplayer_1.0$secondaryArchSuffix
-        lib:libgstvideo_1.0$secondaryArchSuffix
         lib:libharfbuzz$secondaryArchSuffix
         lib:libharfbuzz_gobject$secondaryArchSuffix
         lib:libiconv$secondaryArchSuffix
@@ -118,17 +115,13 @@ BUILD_REQUIRES="
         harfbuzz${secondaryArchSuffix}_glib
         iso_codes
         wayland_protocols
-        gstreamer${secondaryArchSuffix}_devel
         devel:libatk_1.0$secondaryArchSuffix
         devel:libcairo$secondaryArchSuffix
-	devel:libgstgl_1.0$secondaryArchSuffix
         devel:libGL$secondaryArchSuffix
         devel:libgdk_pixbuf_2.0$secondaryArchSuffix
         devel:libgirepository_1.0$secondaryArchSuffix
         devel:libglib_2.0$secondaryArchSuffix
         devel:libgraphene_1.0$secondaryArchSuffix
-        devel:libgstplayer_1.0$secondaryArchSuffix
-        devel:libgstvideo_1.0$secondaryArchSuffix
 	devel:libharfbuzz$secondaryArchSuffix
         devel:libharfbuzz_gobject$secondaryArchSuffix
         devel:libepoxy$secondaryArchSuffix
@@ -171,6 +164,7 @@ BUILD()
                 --datadir="$dataDir" \
                 --localedir="$dataDir/locale" \
                 --sysconfdir="$settingsDir" \
+                -Dmedia-gstreamer=disabled \
                 -Dx11-backend=false \
                 -Dwayland-backend=true \
                 -Dbroadway-backend=false \
