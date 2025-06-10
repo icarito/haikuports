@@ -108,7 +108,7 @@ defineDebugInfoPackage harfbuzz$secondaryArchSuffix \
 BUILD()
 {
 	meson \
-		--buildtype=release \
+		--buildtype=custom \
 		--prefix=$prefix \
 		--libdir=$libDir \
 		--includedir=$includeDir \
@@ -117,12 +117,12 @@ BUILD()
 		--datadir=$dataDir \
 		--bindir="$commandBinDir" \
 		-Dcairo=disabled \
-		-Dglib=disabled \
+		-Dglib=enabled \
 		-Dicu=enabled \
 		-Dintrospection=enabled \
 		-Dgraphite2=enabled \
 		-Dgobject=enabled \
-		-Ddocs=enabled \
+		-Ddocs=disabled \
 		-Dtests=disabled \
 		haiku_build
 	ninja -C haiku_build $jobArgs
@@ -137,7 +137,6 @@ INSTALL()
 
 	# cleanup
 	mkdir -p $docDir
-	cp -R $prefix/share/* $docDir
 	rm -rf $prefix/share
 
 	prepareInstalledDevelLibs \

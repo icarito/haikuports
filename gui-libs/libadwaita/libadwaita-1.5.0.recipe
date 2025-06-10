@@ -1,0 +1,101 @@
+SUMMARY="Building blocks for modern GNOME applications"
+DESCRIPTION="Libadwaita is a GTK 4 library that provides widgets and APIs \
+from the Adwaita design language, complementing GTK itself."
+HOMEPAGE="https://gitlab.gnome.org/GNOME/libadwaita"
+COPYRIGHT="GNOME Project"
+LICENSE="GNU LGPL v2.1"
+REVISION="1"
+
+# NOTA: Usando una versión de la rama 1.7.0.
+# Debes ajustar la versión exacta y el checksum al archivo que descargues.
+# Esta versión se alinea con la rama 'libadwaita-1-7' de tu script de Linux.
+portVersion="1.5.0"
+SOURCE_URI="https://gitlab.gnome.org/GNOME/libadwaita/-/archive/$portVersion/libadwaita-$portVersion.tar.bz2"
+CHECKSUM_SHA256="aaf0381e4376735b8133e4e53d8f685577d8fdf66c2f3a4920a1bf91951f46f1"
+SOURCE_DIR="libadwaita-$portVersion"
+
+ARCHITECTURES="all !x86_gcc2"
+SECONDARY_ARCHITECTURES="x86"
+
+# La biblioteca se llama libadwaita-1.so, por lo que la versión de la lib es "1"
+libVersion="1"
+
+PROVIDES="
+	libadwaita$secondaryArchSuffix = $portVersion
+	lib:libadwaita_$libVersion$secondaryArchSuffix = $libVersion
+	"
+
+PROVIDES_devel="
+	libadwaita${secondaryArchSuffix}_devel = $portVersion
+	devel:libadwaita_$libVersion$secondaryArchSuffix = $libVersion
+	"
+
+# En tu script de Linux, instalas glib, pango, graphene, etc., antes que gtk4.
+# En HaikuPorts, todas esas son dependencias de 'gtk4'.
+# Al requerir 'lib:libgtk_4', el gestor de paquetes se asegura de que todo lo demás esté presente.
+REQUIRES="
+	haiku$secondaryArchSuffix
+	adwaita_icon_theme
+	lib:libgtk_4$secondaryArchSuffix
+	"
+
+REQUIRES_devel="
+	libadwaita$secondaryArchSuffix == $portVersion base
+	devel:libgtk_4$secondaryArchSuffix
+	"
+
+BUILD_REQUIRES="
+	haiku${secondaryArchSuffix}_devel
+	devel:libgtk_4$secondaryArchSuffix
+	"
+
+# Estas son las herramientas necesarias para la compilación, equivalentes a los 'apt-get install'
+# que harías en un Dockerfile de Debian antes de ejecutar tu script.
+# 'cmd:sassc' es crucial para libadwaita.
+BUILD_PREREQUIRES="
+	cmd:gcc$secondaryArchSuffix
+	cmd:ld$secondaryArchSuffix
+	cmd:meson
+	cmd:ninja
+	cmd:pkg_config$secondaryArchSuffix
+	cmd:sassc
+	"
+
+BUILD()
+{
+	# Las opciones de Meson se alinean con la filosofía de tu script de Linux:
+	# --buildtype=release para optimizar.
+	# -Dintrospection=enabled es necesario para bindings.
+	# Deshabilitamos lo innecesario para el paquete final, como vapi, ejemplos y tests.
+	meson setup Build \
+		--buildtype=release \
+		--prefix="$prefix" \
+		--libdir="$libDir" \
+		--includedir="$includeDir" \
+		--datadir="$dataDir" \
+		--localedir="$dataDir/locale" \
+		--sysconfdir="$settingsDir" \
+		-Dintrospection=enabled \
+		-Dvapi=false \
+		-Dexamples=false \
+		-Dtests=false
+
+	ninja -C Build
+}
+
+INSTALL()
+{
+	ninja install -C Build
+
+	# Prepara los archivos de desarrollo (.so, .a, .h) para el paquete _devel
+	prepareInstalledDevelLibs \
+		libadwaita-1
+
+	# Corrige las rutas en los archivos .pc para que pkg-config funcione en Haiku
+	fixPkgconfig
+
+	# Agrupa todos los archivos de desarrollo en el paquete 'devel'
+	packageEntries devel \
+		$developDir
+}
+
