@@ -108,7 +108,7 @@ defineDebugInfoPackage harfbuzz$secondaryArchSuffix \
 BUILD()
 {
 	meson \
-		--buildtype=release \
+		--buildtype=custom \
 		--prefix=$prefix \
 		--libdir=$libDir \
 		--includedir=$includeDir \

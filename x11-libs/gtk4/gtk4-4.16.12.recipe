@@ -77,6 +77,7 @@ REQUIRES_devel="
 	devel:libcairo$secondaryArchSuffix
 	devel:libepoxy$secondaryArchSuffix
 	devel:libgdk_pixbuf_2.0$secondaryArchSuffix
+	gobject_introspection${secondaryArchSuffix}_devel
 	devel:libglib_2.0$secondaryArchSuffix
 	devel:libgraphene_1.0$secondaryArchSuffix
 	devel:libjpeg$secondaryArchSuffix
@@ -97,6 +98,7 @@ BUILD_REQUIRES="
 	devel:libepoxy$secondaryArchSuffix
 	devel:libGL$secondaryArchSuffix
 	devel:libgdk_pixbuf_2.0$secondaryArchSuffix
+	gobject_introspection${secondaryArchSuffix}_devel
 	devel:libglib_2.0$secondaryArchSuffix
 	devel:libgraphene_1.0$secondaryArchSuffix
 	devel:libharfbuzz_gobject$secondaryArchSuffix
