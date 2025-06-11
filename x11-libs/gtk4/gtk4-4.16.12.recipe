@@ -51,6 +51,7 @@ REQUIRES="
 	lib:libfontconfig$secondaryArchSuffix
 	lib:libfribidi$secondaryArchSuffix
 	lib:libgdk_pixbuf_2.0$secondaryArchSuffix
+	lib:libgirepository_1.0$secondaryArchSuffix
 	lib:libglib_2.0$secondaryArchSuffix
 	lib:libgraphene_1.0$secondaryArchSuffix
 	lib:libharfbuzz$secondaryArchSuffix
@@ -77,6 +78,7 @@ REQUIRES_devel="
 	devel:libcairo$secondaryArchSuffix
 	devel:libepoxy$secondaryArchSuffix
 	devel:libgdk_pixbuf_2.0$secondaryArchSuffix
+	gobject_introspection${secondaryArchSuffix}_devel
 	devel:libglib_2.0$secondaryArchSuffix
 	devel:libgraphene_1.0$secondaryArchSuffix
 	devel:libjpeg$secondaryArchSuffix
@@ -97,6 +99,7 @@ BUILD_REQUIRES="
 	devel:libepoxy$secondaryArchSuffix
 	devel:libGL$secondaryArchSuffix
 	devel:libgdk_pixbuf_2.0$secondaryArchSuffix
+	gobject_introspection${secondaryArchSuffix}_devel
 	devel:libglib_2.0$secondaryArchSuffix
 	devel:libgraphene_1.0$secondaryArchSuffix
 	devel:libharfbuzz_gobject$secondaryArchSuffix
@@ -123,8 +126,10 @@ BUILD_PREREQUIRES="
 
 BUILD()
 {
+	CFLAGS="-D_BSD_SOURCE" \
+	LDFLAGS="-lbsd -lgnu -lnetwork" \
 	meson Build \
-		--buildtype=release \
+		--buildtype=custom \
 		--prefix="$prefix" \
 		--libdir="$libDir" \
 		--includedir="$includeDir" \
