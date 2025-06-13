@@ -53,47 +53,18 @@ jobs:
       - name: Detect modified packages compared to master
         id: detect-changes
         run: |
-          # Cambiar al directorio de haikuports dentro del VM
           vmshell "cd ~/haikuports && \
-            # Configurar git para evitar warnings
-            git config --global user.email 'actions@github.com' && \
-            git config --global user.name 'GitHub Actions' && \
-
-            # Obtener la lista de directorios modificados respecto a master
-            if git rev-parse --verify origin/master >/dev/null 2>&1; then
-              BASE_REF='origin/master'
-            elif git rev-parse --verify master >/dev/null 2>&1; then
-              BASE_REF='master'
-            else
-              echo 'No master branch found, building all packages'
-              BASE_REF='HEAD~1'
-            fi
-
-            echo \"Comparing against: \$BASE_REF\"
-
-            # Encontrar directorios de paquetes modificados
-            CHANGED_DIRS=\$(git diff --name-only \$BASE_REF...HEAD | \
-              grep -E '^[^/]+/[^/]+/' | \
-              cut -d'/' -f1-2 | \
-              sort -u | \
-              while read dir; do
-                if [ -d \"\$dir\" ] && ls \"\$dir\"/*.recipe >/dev/null 2>&1; then
-                  echo \"\$dir\"
-                fi
-              done)
-
-            if [ -z \"\$CHANGED_DIRS\" ]; then
+            git fetch origin master && \
+            CHANGED_DIRS=\$(git diff --name-only --diff-filter=d master * | grep / | sort -u | cut -d '/' -f 2 | sort | uniq) && \
+            if [ -z \"$CHANGED_DIRS\" ]; then
               echo 'No packages to build'
-              echo 'packages=' >> /tmp/packages_to_build.txt
+              echo 'packages=[]' > /tmp/packages_to_build.txt
             else
               echo 'Packages to build:'
-              echo \"\$CHANGED_DIRS\" | tee /tmp/packages_to_build.txt
-              # Convertir a formato para GitHub Actions
-              PACKAGES_JSON=\$(echo \"\$CHANGED_DIRS\" | jq -R -s -c 'split(\"\n\") | map(select(length > 0))')
-              echo \"packages=\$PACKAGES_JSON\" >> /tmp/packages_to_build.txt
+              echo \"$CHANGED_DIRS\" | tee /tmp/packages_to_build.txt
+              PACKAGES_JSON=\$(echo \"$CHANGED_DIRS\" | jq -R -s -c 'split("\n") | map(select(length > 0))')
+              echo \"packages=$PACKAGES_JSON\" >> /tmp/packages_to_build.txt
             fi"
-
-          # Leer el resultado del VM
           PACKAGES=$(vmshell cat /tmp/packages_to_build.txt | grep '^packages=' | cut -d'=' -f2-)
           echo "packages=$PACKAGES" >> $GITHUB_OUTPUT
 
