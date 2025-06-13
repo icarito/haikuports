@@ -23,7 +23,7 @@ jobs:
             gcc binutils make cmake autoconf automake \
             bison flex gawk gettext git gmp gperf grep \
             libtool m4 nasm ncurses6 patch pkgconf \
-            python3.10 sed tar xz_utils zlib zlib_devel \
+            python3.10 pip_python310 sed tar xz_utils zlib zlib_devel \
             curl curl_devel openssl3 openssl3_devel \
             glib2 glib2_devel gtk3 gtk3_devel cairo1.18 cairo1.18_devel \
             fontconfig fontconfig_devel freetype freetype_devel \
@@ -35,11 +35,6 @@ jobs:
             libyaml libyaml_devel jsoncpp meson ninja \
             bash coreutils diffutils findutils gzip file \
             which unzip zip bc less vim nano
-
-      - name: Install Python dependencies for haikuporter
-        run: |
-          vmshell python3 -m ensurepip --upgrade
-          vmshell python3 -m pip install --upgrade pip
 
       - name: Checkout HaikuPorts repository in VM
         run: |
