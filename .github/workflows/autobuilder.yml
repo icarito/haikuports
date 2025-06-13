@@ -54,7 +54,7 @@ jobs:
           vmshell "mkdir -p /boot/home/config/settings && \
             echo 'TREE_PATH="/boot/home/haikuports"' > /boot/home/config/settings/haikuports.conf && \
             echo 'PACKAGES_PATH="/boot/home/haikuports/packages"' >> /boot/home/config/settings/haikuports.conf && \
-            echo 'PACKAGER="GitHub Actions Builder <actions@github.com>"' >> /boot/home/config/settings/haikuports.conf && \
+            echo 'PACKAGER="GitHub Actions Builder \<actions@github.com\>"' >> /boot/home/config/settings/haikuports.conf && \
             echo 'TARGET_ARCHITECTURE="x86_64"' >> /boot/home/config/settings/haikuports.conf && \
             echo 'ALLOW_UNTESTED="yes"' >> /boot/home/config/settings/haikuports.conf && \
             echo 'ALLOW_UNSAFE_SOURCES="yes"' >> /boot/home/config/settings/haikuports.conf && \
