@@ -1,0 +1,228 @@
+name: Build HaikuPorts packages
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master, development ]
+  pull_request:
+    branches: [ main, master, development ]
+
+jobs:
+  build-haikuports:
+    runs-on: ubuntu-latest
+    container: docker.io/hectorm/qemu-haiku:latest
+    
+    steps:
+      - name: Wait until the VM is ready
+        run: container-init & timeout 600 vmshell exit 0
+        
+      - name: Install build dependencies and compilation tools
+        run: |
+          # Instalar paquetes esenciales de compilación basados en la lista del usuario
+          vmshell pkgman install -y \
+            gcc binutils make cmake autoconf automake \
+            bison flex gawk gettext git gmp gperf grep \
+            libtool m4 nasm ncurses6 patch pkgconf \
+            python3.10 sed tar xz_utils zlib zlib_devel \
+            curl curl_devel openssl3 openssl3_devel \
+            glib2 glib2_devel gtk3 gtk3_devel cairo1.18 cairo1.18_devel \
+            fontconfig fontconfig_devel freetype freetype_devel \
+            harfbuzz harfbuzz_devel pango pango_devel \
+            expat libffi libffi_devel libxml2 libxml2_devel \
+            libxslt libpcre libpcre_devel libpng16 libpng16_devel \
+            libjpeg_turbo libjpeg_turbo_devel tiff tiff_devel \
+            libarchive libarchive_devel bzip2 bzip2_devel \
+            libyaml libyaml_devel jsoncpp meson ninja \
+            bash coreutils diffutils findutils gzip file \
+            which unzip zip bc less vim nano
+            
+      - name: Install Python dependencies for haikuporter
+        run: |
+          vmshell python3 -m ensurepip --upgrade
+          vmshell python3 -m pip install --upgrade pip
+          
+      - name: Checkout HaikuPorts repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Necesario para comparar con master
+          
+      - name: Checkout HaikuPorter
+        run: |
+          vmshell git clone https://github.com/haikuports/haikuporter.git /tmp/haikuporter
+          
+      - name: Copy repositories to VM
+        run: |
+          # Copiar HaikuPorts al VM
+          tar -cf - ./ | vmshell tar -xf - -C /tmp/haikuports
+          
+      - name: Setup HaikuPorter configuration
+        run: |
+          vmshell "cat > /tmp/haikuports/haikuports.conf << 'EOF'
+          TREE_PATH=\"/tmp/haikuports\"
+          PACKAGES_PATH=\"/tmp/haikuports/packages\"
+          PACKAGER=\"GitHub Actions Builder <actions@github.com>\"
+          TARGET_ARCHITECTURE=\"x86_64\"
+          ALLOW_UNTESTED=\"yes\"
+          ALLOW_UNSAFE_SOURCES=\"yes\"
+          CREATE_SOURCE_PACKAGES=\"no\"
+          PACKAGE_COMMAND=\"package\"
+          PACKAGE_REPO_COMMAND=\"package_repo\"
+          EOF"
+          
+      - name: Detect modified packages compared to master
+        id: detect-changes
+        run: |
+          # Cambiar al directorio de haikuports dentro del VM
+          vmshell "cd /tmp/haikuports && \
+            # Configurar git para evitar warnings
+            git config --global user.email 'actions@github.com' && \
+            git config --global user.name 'GitHub Actions' && \
+            
+            # Obtener la lista de directorios modificados respecto a master
+            if git rev-parse --verify origin/master >/dev/null 2>&1; then
+              BASE_REF='origin/master'
+            elif git rev-parse --verify master >/dev/null 2>&1; then
+              BASE_REF='master'
+            else
+              echo 'No master branch found, building all packages'
+              BASE_REF='HEAD~1'
+            fi
+            
+            echo \"Comparing against: \$BASE_REF\"
+            
+            # Encontrar directorios de paquetes modificados
+            CHANGED_DIRS=\$(git diff --name-only \$BASE_REF...HEAD | \
+              grep -E '^[^/]+/[^/]+/' | \
+              cut -d'/' -f1-2 | \
+              sort -u | \
+              while read dir; do
+                if [ -d \"\$dir\" ] && ls \"\$dir\"/*.recipe >/dev/null 2>&1; then
+                  echo \"\$dir\"
+                fi
+              done)
+            
+            if [ -z \"\$CHANGED_DIRS\" ]; then
+              echo 'No packages to build'
+              echo 'packages=' >> /tmp/packages_to_build.txt
+            else
+              echo 'Packages to build:'
+              echo \"\$CHANGED_DIRS\" | tee /tmp/packages_to_build.txt
+              # Convertir a formato para GitHub Actions
+              PACKAGES_JSON=\$(echo \"\$CHANGED_DIRS\" | jq -R -s -c 'split(\"\n\") | map(select(length > 0))')
+              echo \"packages=\$PACKAGES_JSON\" >> /tmp/packages_to_build.txt
+            fi"
+            
+          # Leer el resultado del VM
+          PACKAGES=$(vmshell cat /tmp/packages_to_build.txt | grep '^packages=' | cut -d'=' -f2-)
+          echo "packages=$PACKAGES" >> $GITHUB_OUTPUT
+          
+      - name: Build modified packages with haikuporter
+        if: steps.detect-changes.outputs.packages != '[]' && steps.detect-changes.outputs.packages != ''
+        run: |
+          PACKAGES='${{ steps.detect-changes.outputs.packages }}'
+          echo "Building packages: $PACKAGES"
+          
+          vmshell "cd /tmp/haikuports && \
+            # Hacer ejecutable haikuporter
+            chmod +x /tmp/haikuporter/haikuporter && \
+            
+            # Crear directorios necesarios
+            mkdir -p packages && \
+            mkdir -p repository && \
+            
+            # Función para construir un paquete
+            build_package() {
+              local pkg_dir=\$1
+              local pkg_name=\$(basename \$pkg_dir)
+              local category=\$(dirname \$pkg_dir)
+              
+              echo \"Building package: \$pkg_dir\"
+              
+              # Intentar construir el paquete con dependencias faltantes
+              if /tmp/haikuporter/haikuporter \$pkg_name --missing-dependencies --no-source-packages; then
+                echo \"✓ Successfully built \$pkg_dir\"
+                return 0
+              else
+                echo \"✗ Failed to build \$pkg_dir\"
+                return 1
+              fi
+            }
+            
+            # Procesar cada paquete modificado
+            SUCCESS_COUNT=0
+            FAILED_COUNT=0
+            FAILED_PACKAGES=''
+            
+            # Convertir JSON a lista y procesar cada paquete
+            echo '$PACKAGES' | jq -r '.[]' | while read pkg_dir; do
+              if [ -n \"\$pkg_dir\" ]; then
+                if build_package \"\$pkg_dir\"; then
+                  SUCCESS_COUNT=\$((SUCCESS_COUNT + 1))
+                else
+                  FAILED_COUNT=\$((FAILED_COUNT + 1))
+                  FAILED_PACKAGES=\"\$FAILED_PACKAGES \$pkg_dir\"
+                fi
+              fi
+            done
+            
+            echo \"Build summary:\"
+            echo \"- Successful builds: \$SUCCESS_COUNT\"
+            echo \"- Failed builds: \$FAILED_COUNT\"
+            if [ \$FAILED_COUNT -gt 0 ]; then
+              echo \"- Failed packages:\$FAILED_PACKAGES\"
+            fi"
+            
+      - name: Collect build artifacts
+        if: always()
+        run: |
+          # Crear directorio para artefactos
+          mkdir -p build-artifacts
+          
+          # Copiar paquetes construidos desde el VM
+          vmshell "cd /tmp/haikuports && \
+            if [ -d packages ] && [ \"\$(ls -A packages/*.hpkg 2>/dev/null)\" ]; then
+              echo 'Found built packages:'
+              ls -la packages/*.hpkg || true
+              tar -czf /tmp/built-packages.tar.gz packages/*.hpkg
+            else
+              echo 'No packages were built'
+              touch /tmp/built-packages.tar.gz
+            fi
+            
+            # Recopilar logs si existen
+            if [ -d work ]; then
+              find work -name '*.log' -type f | head -20 | xargs tar -czf /tmp/build-logs.tar.gz 2>/dev/null || touch /tmp/build-logs.tar.gz
+            else
+              touch /tmp/build-logs.tar.gz
+            fi"
+            
+          # Copiar artefactos del VM al runner
+          vmshell cat /tmp/built-packages.tar.gz > build-artifacts/built-packages.tar.gz
+          vmshell cat /tmp/build-logs.tar.gz > build-artifacts/build-logs.tar.gz
+          
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: haikuports-build-${{ github.run_number }}
+          path: build-artifacts/
+          retention-days: 30
+          
+      - name: Display build summary
+        if: always()
+        run: |
+          echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Workflow:** ${{ github.workflow }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Run Number:** ${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Trigger:** ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          PACKAGES='${{ steps.detect-changes.outputs.packages }}'
+          if [ "$PACKAGES" = "[]" ] || [ -z "$PACKAGES" ]; then
+            echo "**Result:** No packages needed to be built" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "**Packages processed:** $PACKAGES" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Artifacts:** Check the uploaded build artifacts for built packages and logs" >> $GITHUB_STEP_SUMMARY
+          fi
