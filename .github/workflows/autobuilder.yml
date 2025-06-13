@@ -41,29 +41,26 @@ jobs:
           vmshell python3 -m ensurepip --upgrade
           vmshell python3 -m pip install --upgrade pip
 
-      - name: Checkout HaikuPorts repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0  # Necesario para comparar con master
-
-      - name: Copy repositories to VM
+      - name: Checkout HaikuPorts repository in VM
         run: |
-          tar -cf - ./ | vmshell tar -xf - -C /boot/home/
+          vmshell "mkdir -p /boot/home/haikuports && \
+            git clone https://github.com/${GITHUB_REPOSITORY}.git /boot/home/haikuports && \
+            cd /boot/home/haikuports && \
+            git checkout ${GITHUB_SHA}"
 
       - name: Setup HaikuPorter
         run: |
-          vmshell git clone https://github.com/haikuports/haikuporter.git
-          vmshell "cat > /boot/home/config/settings/haikuports.conf << 'EOF'
-          TREE_PATH=\"~/haikuports\"
-          PACKAGES_PATH=\"~/haikuports/packages\"
-          PACKAGER=\"GitHub Actions Builder <actions@github.com>\"
-          TARGET_ARCHITECTURE=\"x86_64\"
-          ALLOW_UNTESTED=\"yes\"
-          ALLOW_UNSAFE_SOURCES=\"yes\"
-          CREATE_SOURCE_PACKAGES=\"no\"
-          PACKAGE_COMMAND=\"package\"
-          PACKAGE_REPO_COMMAND=\"package_repo\"
-          EOF"
+          vmshell git clone https://github.com/haikuports/haikuporter.git /boot/home/haikuporter
+          vmshell "mkdir -p /boot/home/config/settings && \
+            echo 'TREE_PATH="/boot/home/haikuports"' > /boot/home/config/settings/haikuports.conf && \
+            echo 'PACKAGES_PATH="/boot/home/haikuports/packages"' >> /boot/home/config/settings/haikuports.conf && \
+            echo 'PACKAGER="GitHub Actions Builder <actions@github.com>"' >> /boot/home/config/settings/haikuports.conf && \
+            echo 'TARGET_ARCHITECTURE="x86_64"' >> /boot/home/config/settings/haikuports.conf && \
+            echo 'ALLOW_UNTESTED="yes"' >> /boot/home/config/settings/haikuports.conf && \
+            echo 'ALLOW_UNSAFE_SOURCES="yes"' >> /boot/home/config/settings/haikuports.conf && \
+            echo 'CREATE_SOURCE_PACKAGES="no"' >> /boot/home/config/settings/haikuports.conf && \
+            echo 'PACKAGE_COMMAND="package"' >> /boot/home/config/settings/haikuports.conf && \
+            echo 'PACKAGE_REPO_COMMAND="package_repo"' >> /boot/home/config/settings/haikuports.conf"
 
       - name: Detect modified packages compared to master
         id: detect-changes
