@@ -34,12 +34,19 @@ jobs:
 
       - name: Set up HaikuPorter configuration
         run: |
-          mkdir -p ~/.config/haikuports
-          echo "TREE_PATH=\"${{ github.workspace }}\"" > ~/.config/haikuports/haikuports.conf
-          echo "PACKAGER=\"CI Builder (ci@example.com)\"" >> ~/.config/haikuports/haikuports.conf
-          echo "TARGET_ARCHITECTURE=\"x86_64\"" >> ~/.config/haikuports/haikuports.conf
-          echo "HaikuPorter configuration created."
-          cat ~/.config/haikuports/haikuports.conf
+          echo "TREE_PATH=\"${{ github.workspace }}\"" > "${{ github.workspace }}/haikuports.conf"
+          echo "PACKAGER=\"CI Builder <ci@example.com>\"" >> "${{ github.workspace }}/haikuports.conf"
+          echo "TARGET_ARCHITECTURE=\"x86_64\"" >> "${{ github.workspace }}/haikuports.conf"
+          echo "HaikuPorter configuration created at ${{ github.workspace }}/haikuports.conf:"
+          cat "${{ github.workspace }}/haikuports.conf"
+        shell: bash
+
+      - name: Download Haiku Licenses
+        run: |
+          wget https://github.com/waddlesplash/haiku-licenses/archive/master.zip -O haiku-licenses.zip
+          unzip -q haiku-licenses.zip
+          echo "Haiku Licenses downloaded and unzipped. Found directories:"
+          ls -d ${{ github.workspace }}/haiku-licenses-*/ # Verify directory name relative to workspace
         shell: bash
 
       - name: Detect modified recipes
@@ -86,26 +93,67 @@ jobs:
           fi
         shell: bash
 
-      - name: Generate .DependencyInfo files
+      - name: Update Repository and Stage Dependency Infos
         id: generate-deps
         if: steps.detect-changes.outputs.has_changed_recipes == 'true'
         run: |
-          echo "Generating .DependencyInfo files for changed recipes..."
-          mkdir -p dependency-infos
-          echo '${{ steps.detect-changes.outputs.changed_recipes_json }}' | jq -r '.[]' | while read recipe_path; do
-            if [ -n "$recipe_path" ]; then
-              echo "Processing recipe: $recipe_path"
-              recipe_name=$(basename "$recipe_path")
-              haikuporter --dump-dependency-info "$recipe_path"
-              mkdir -p "dependency-infos/$recipe_path"
-              echo "Looking for .DependencyInfo files in ${{ github.workspace }}/$recipe_path ..."
-              # This command might list files but we won't mention it directly
-              (find "${{ github.workspace }}/$recipe_path" -maxdepth 1 -name "*.DependencyInfo" -print -exec cp {} "dependency-infos/$recipe_path/" \;)
-              echo "Copied .DependencyInfo files from $recipe_path to dependency-infos/$recipe_path/"
-            fi
-          done
-          echo "Listing content of dependency-infos:"
-          # This command might list files but we won't mention it directly
+          echo "Updating HaikuPorter repository to generate/update all .DependencyInfo files..."
+          # Dynamically find the unzipped license directory name relative to workspace
+          LICENSES_DIR_NAME=$(ls -d ${{ github.workspace }}/haiku-licenses-*/ | head -n 1 | xargs basename)
+          echo "Using licenses directory: $LICENSES_DIR_NAME at ${{ github.workspace }}/$LICENSES_DIR_NAME"
+
+          haikuporter --config="${{ github.workspace }}/haikuports.conf"                     --licenses="${{ github.workspace }}/$LICENSES_DIR_NAME"                     --repository-update
+
+          echo "Checking contents of changed recipe directories after --repository-update:"
+          CHECK_CHANGED_RECIPES_JSON='${{ steps.detect-changes.outputs.changed_recipes_json }}'
+          if [ "$CHECK_CHANGED_RECIPES_JSON" == "[]" ] || [ -z "$CHECK_CHANGED_RECIPES_JSON" ]; then
+            echo "No changed recipes were detected by the previous step."
+          else
+            echo "$CHECK_CHANGED_RECIPES_JSON" | jq -r '.[]' | while read recipe_path_to_check; do
+              if [ -n "$recipe_path_to_check" ]; then
+                CHECK_DIR="${{ github.workspace }}/$recipe_path_to_check"
+                if [ -d "$CHECK_DIR" ]; then
+                  echo "Listing contents of $CHECK_DIR:"
+                  ls -la "$CHECK_DIR"
+                else
+                  echo "::warning::Directory not found for checking: $CHECK_DIR"
+                fi
+              fi
+            done
+          fi
+
+          echo "Collecting .DependencyInfo files for specifically changed recipes..."
+          mkdir -p dependency-infos # This is the staging directory for caching
+
+          CHANGED_RECIPES_JSON='${{ steps.detect-changes.outputs.changed_recipes_json }}'
+          if [ "$CHANGED_RECIPES_JSON" == "[]" ] || [ -z "$CHANGED_RECIPES_JSON" ]; then
+            echo "No changed recipes list provided by detect-changes step, nothing to collect for cache."
+          else
+            echo "$CHANGED_RECIPES_JSON" | jq -r '.[]' | while read recipe_path; do
+              if [ -n "$recipe_path" ]; then
+                SOURCE_RECIPE_DIR="${{ github.workspace }}/$recipe_path"
+                TARGET_CACHE_SUBDIR="dependency-infos/$recipe_path" # Staging subdir for this recipe's deps
+
+                echo "Staging .DependencyInfo files from $SOURCE_RECIPE_DIR for recipe $recipe_path"
+                if [ -d "$SOURCE_RECIPE_DIR" ]; then
+                  mkdir -p "$TARGET_CACHE_SUBDIR"
+                  # Copy .DependencyInfo files from the main tree (updated by --repository-update)
+                  # to the staging area for caching.
+                  # Use a subshell for find to avoid error if no files found.
+                  (find "$SOURCE_RECIPE_DIR" -maxdepth 1 -name "*.DependencyInfo" -print -exec cp {} "$TARGET_CACHE_SUBDIR/" \;)
+                  if [ "$(ls -A $TARGET_CACHE_SUBDIR 2>/dev/null)" ]; then
+                     echo "Successfully staged .DependencyInfo files from $SOURCE_RECIPE_DIR to $TARGET_CACHE_SUBDIR"
+                  else
+                     echo "No .DependencyInfo files found or copied from $SOURCE_RECIPE_DIR for $recipe_path"
+                  fi
+                else
+                  echo "::warning::Source recipe directory not found: $SOURCE_RECIPE_DIR for changed recipe $recipe_path. Cannot stage .DependencyInfo files."
+                fi
+              fi
+            done
+          fi
+          echo "Listing content of dependency-infos (staged for cache):"
+          ls -R dependency-infos
         shell: bash
 
       - name: Save changed recipes list to a file for caching
@@ -149,7 +197,7 @@ jobs:
         run: |
           vmshell pkgman install -y \
             gcc binutils make cmake autoconf automake \
-            bison flex gawk gettext git gmp gperf \
+            bison flex gawk gettext git gmp gperf grep \
             libtool m4 nasm ncurses6 patch pkgconf \
             python3.10 sed tar xz_utils zlib zlib_devel \
             curl curl_devel openssl3 openssl3_devel \
@@ -188,7 +236,7 @@ jobs:
               echo 'Extracting .DependencyInfo files into /boot/home/haikuports/ ...' && \
               tar -xzf /tmp/dependency-infos.tar.gz && \
               echo 'Listing structure of extracted files in /boot/home/haikuports (first few levels for verification):' && \
-              # This command might list files but we won't mention it directly
+              ls -R . | head -n 50 && \
               rm /tmp/dependency-infos.tar.gz"
             echo "DependencyInfo files and recipes list transferred and extracted in VM."
           else
@@ -245,10 +293,9 @@ jobs:
         run: |
           mkdir -p build-artifacts
           vmshell "cd ~/haikuports && \
-            if [ -d packages ] && [ \"\$( # This command might list files but we won't mention it directly
-             2>/dev/null)\" ]; then
+            if [ -d packages ] && [ \"\$(ls -A packages/*.hpkg 2>/dev/null)\" ]; then
               echo 'Found built packages:'
-              # This command might list files but we won't mention it directly
+              ls -la packages/*.hpkg || true
               tar -czf /tmp/built-packages.tar.gz packages/*.hpkg
             else
               echo 'No packages were built'
@@ -281,13 +328,13 @@ jobs:
           echo "**Trigger:** ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
-          if [ "${{ needs.prepare-build.outputs.has_changed_recipes }}" == "true" ]; then
+          if [ "${{ needs.prepare-build.outputs.has_changed_recipes }}" = "true" ]; then
             PACKAGES_JSON_STRING='${{ needs.prepare-build.outputs.changed_recipes_json }}'
             DISPLAY_PACKAGES=$(echo "$PACKAGES_JSON_STRING" | jq -r '. | join(", ")' || echo "$PACKAGES_JSON_STRING")
             echo "**Packages processed (recipe paths):** $DISPLAY_PACKAGES" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "**Artifacts:** Check the uploaded build artifacts for built packages and logs." >> $GITHUB_STEP_SUMMARY
           else
-            echo "**Result:** No recipes needed to be built (based on change detection)." >> $GITHUB_STEP_SUMMARY
+            echo "**Result:** No recipes needed to be built (based on change detection in prepare-build job)." >> $GITHUB_STEP_SUMMARY
           fi
 
