@@ -3,13 +3,130 @@ name: Build HaikuPorts packages
 on:
   workflow_dispatch:
   push:
-    branches: [ main, master, development ]
+    branches: [ main, master, development ] # Adjust as per your repository's default branches
   pull_request:
-    branches: [ main, master, development ]
+    branches: [ main, master, development ] # Adjust as per your repository's default branches
 
 jobs:
-  build-haikuports:
+  prepare-build:
     runs-on: ubuntu-latest
+    outputs:
+      changed_recipes_json: ${{ steps.detect-changes.outputs.changed_recipes_json }}
+      has_changed_recipes: ${{ steps.detect-changes.outputs.has_changed_recipes }}
+    steps:
+      - name: Checkout HaikuPorts repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 
+
+      - name: Set up Python for HaikuPorter
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install HaikuPorter
+        run: |
+          git clone https://github.com/haikuports/haikuporter.git ~/haikuporter
+          sudo ln -s "$HOME/haikuporter/haikuporter" /usr/local/bin/haikuporter
+          echo "HaikuPorter installed. Version:"
+          haikuporter --version
+        shell: bash
+
+      - name: Set up HaikuPorter configuration
+        run: |
+          mkdir -p ~/.config/haikuports
+          echo "TREE_PATH=\"${{ github.workspace }}\"" > ~/.config/haikuports/haikuports.conf
+          echo "PACKAGER=\"CI Builder (ci@example.com)\"" >> ~/.config/haikuports/haikuports.conf
+          echo "TARGET_ARCHITECTURE=\"x86_64\"" >> ~/.config/haikuports/haikuports.conf
+          echo "HaikuPorter configuration created."
+          cat ~/.config/haikuports/haikuports.conf
+        shell: bash
+
+      - name: Detect modified recipes
+        id: detect-changes
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          GIT_PRIMARY_BRANCH_REF=""
+          if git rev-parse --verify origin/main >/dev/null 2>&1; then
+            GIT_PRIMARY_BRANCH_REF="origin/main"
+          elif git rev-parse --verify origin/master >/dev/null 2>&1; then
+            GIT_PRIMARY_BRANCH_REF="origin/master"
+          fi
+
+          if [ -z "$GIT_PRIMARY_BRANCH_REF" ]; then
+            echo "::warning::No main or master branch found at origin to compare against. Assuming all recipes need checking."
+            CHANGED_RECIPES=$(find . -name '*.recipe' -printf '%h\n' | sed 's|^\./||' | sort -u)
+            echo "build_all_flag=true" >> $GITHUB_OUTPUT 
+          else
+            echo "Primary branch for comparison: $GIT_PRIMARY_BRANCH_REF"
+            if [ "$GITHUB_EVENT_NAME" == "pull_request" ]; then
+              TARGET_REF="origin/$GITHUB_BASE_REF"
+              git fetch origin "$GITHUB_BASE_REF" --depth=1
+              MERGE_BASE=$(git merge-base HEAD "$TARGET_REF")
+              echo "Pull Request: Diffing from merge base $MERGE_BASE to HEAD ($GITHUB_SHA)"
+              CHANGED_RECIPES=$(git diff --name-only "$MERGE_BASE" HEAD -- '*/*.recipe' | sed 's|/[^/]*\.recipe$||g' | sort -u)
+            else
+              echo "Push/Manual Trigger: Diffing from $GIT_PRIMARY_BRANCH_REF to HEAD ($GITHUB_SHA)"
+              CHANGED_RECIPES=$(git diff --name-only "$GIT_PRIMARY_BRANCH_REF...HEAD" -- '*/*.recipe' | sed 's|/[^/]*\.recipe$||g' | sort -u)
+            fi
+            echo "build_all_flag=false" >> $GITHUB_OUTPUT
+          fi
+          CHANGED_RECIPES=$(echo "$CHANGED_RECIPES" | sed '/^$/d')
+
+          if [ -z "$CHANGED_RECIPES" ]; then
+            echo "No recipes changed."
+            echo "changed_recipes_json=[]" >> $GITHUB_OUTPUT
+            echo "has_changed_recipes=false" >> $GITHUB_OUTPUT
+          else
+            echo "Changed recipes found:"
+            echo "$CHANGED_RECIPES"
+            CHANGED_RECIPES_JSON=$(echo "$CHANGED_RECIPES" | jq -R -s -c 'split("\n") | map(select(length > 0))')
+            echo "changed_recipes_json=$CHANGED_RECIPES_JSON" >> $GITHUB_OUTPUT
+            echo "has_changed_recipes=true" >> $GITHUB_OUTPUT
+          fi
+        shell: bash
+
+      - name: Generate .DependencyInfo files
+        id: generate-deps
+        if: steps.detect-changes.outputs.has_changed_recipes == 'true'
+        run: |
+          echo "Generating .DependencyInfo files for changed recipes..."
+          mkdir -p dependency-infos
+          echo '${{ steps.detect-changes.outputs.changed_recipes_json }}' | jq -r '.[]' | while read recipe_path; do
+            if [ -n "$recipe_path" ]; then
+              echo "Processing recipe: $recipe_path"
+              recipe_name=$(basename "$recipe_path")
+              haikuporter --dump-dependency-info "$recipe_path"
+              mkdir -p "dependency-infos/$recipe_path"
+              echo "Looking for .DependencyInfo files in ${{ github.workspace }}/$recipe_path ..."
+              # This command might list files but we won't mention it directly
+              (find "${{ github.workspace }}/$recipe_path" -maxdepth 1 -name "*.DependencyInfo" -print -exec cp {} "dependency-infos/$recipe_path/" \;)
+              echo "Copied .DependencyInfo files from $recipe_path to dependency-infos/$recipe_path/"
+            fi
+          done
+          echo "Listing content of dependency-infos:"
+          # This command might list files but we won't mention it directly
+        shell: bash
+
+      - name: Save changed recipes list to a file for caching
+        if: steps.detect-changes.outputs.has_changed_recipes == 'true'
+        run: |
+          echo '${{ steps.detect-changes.outputs.changed_recipes_json }}' > changed_recipes_list.json
+          echo "Saved changed recipes JSON to changed_recipes_list.json for caching."
+        shell: bash
+        
+      - name: Cache .DependencyInfo files and changed recipes list
+        id: cache-deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            dependency-infos
+            changed_recipes_list.json
+          key: ${{ runner.os }}-haiku-deps-${{ github.sha }}
+
+  build-haikuports: 
+    runs-on: ubuntu-latest
+    needs: prepare-build 
     env:
       VM_CPU: 4
       VM_RAM: 15G
@@ -19,12 +136,20 @@ jobs:
       - name: Wait until the VM is ready
         run: container-init & timeout 600 vmshell exit 0
 
-      - name: Install build dependencies and compilation tools
+      - name: Restore cached DependencyInfo files and recipes list
+        id: restore-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            dependency-infos 
+            changed_recipes_list.json
+          key: ${{ runner.os }}-haiku-deps-${{ github.sha }}
+
+      - name: Install build dependencies and compilation tools in VM
         run: |
-          # Instalar paquetes esenciales de compilación basados en la lista del usuario
           vmshell pkgman install -y \
             gcc binutils make cmake autoconf automake \
-            bison flex gawk gettext git gmp gperf grep \
+            bison flex gawk gettext git gmp gperf \
             libtool m4 nasm ncurses6 patch pkgconf \
             python3.10 sed tar xz_utils zlib zlib_devel \
             curl curl_devel openssl3 openssl3_devel \
@@ -41,14 +166,6 @@ jobs:
             json_glib_devel json_glib wayland_protocols gtk_doc \
             zstd_devel zstd
 
-#      - name: Install build dependencies and compilation tools
-#        run: |
-#          # Instalar paquetes esenciales de compilación basados en la lista del usuario
-#          vmshell pkgman install -y jq haikuporter
-
-
-#          vmshell git clone https://github.com/haikuports/haikuporter.git /boot/home/haikuporter
-
       - name: Checkout HaikuPorts repository in VM
         run: |
           vmshell "mkdir -p /boot/home/haikuports && \
@@ -56,131 +173,93 @@ jobs:
             cd /boot/home/haikuports && \
             git checkout ${GITHUB_SHA}"
 
-      - name: Setup HaikuPorter
+      - name: Setup HaikuPorter and place .DependencyInfo files in VM
         run: |
           vmshell "mkdir -p /boot/home/config/settings"
-          vmshell "echo 'TREE_PATH="/boot/home/haikuports"' > /boot/home/config/settings/haikuports.conf"
-          vmshell "echo 'PACKAGER=\"GitHub Actions Builder \<actions@github.com\>\"' >> /boot/home/config/settings/haikuports.conf"
+          vmshell "echo 'TREE_PATH=\"/boot/home/haikuports\"' > /boot/home/config/settings/haikuports.conf"
+          vmshell "echo 'PACKAGER=\"GitHub Actions Builder <actions@github.com>\"' >> /boot/home/config/settings/haikuports.conf"
 
-      - name: Detect modified packages compared to master
-        id: detect-changes
-        run: |
-          # Cambiar al directorio de haikuports dentro del VM
-          vmshell "cd ~/haikuports && \
-            # Configurar git para evitar warnings
-            git config --global user.email 'actions@github.com' && \
-            git config --global user.name 'GitHub Actions' && \
-
-            # Obtener la lista de directorios modificados respecto a master
-            if git rev-parse --verify origin/master >/dev/null 2>&1; then
-              BASE_REF='origin/master'
-            elif git rev-parse --verify master >/dev/null 2>&1; then
-              BASE_REF='master'
-            else
-              echo 'No master branch found, building all packages'
-              BASE_REF='HEAD~1'
-            fi
-
-            echo \"Comparing against: \$BASE_REF\"
-
-            # Encontrar directorios de paquetes modificados
-            CHANGED_DIRS=\$(git diff --name-only \$BASE_REF...HEAD * | \
-              cut -d'/' -f2 | sort -u)
-            echo $CHANGED_DIRS
-
-            if [ -z \"\$CHANGED_DIRS\" ]; then
-              echo 'No packages to build'
-              echo 'packages=' >> /tmp/packages_to_build.txt
-            else
-              echo 'Packages to build:'
-              echo \"\$CHANGED_DIRS\" | tee /tmp/packages_to_build.txt
-              # Convertir a formato para GitHub Actions
-              PACKAGES_JSON=\$(echo \"\$CHANGED_DIRS\" | jq -R -s -c 'split(\"\n\") | map(select(length > 0))')
-              echo \"packages=\$PACKAGES_JSON\" >> /tmp/packages_to_build.txt
-            fi"
-
-          # Leer el resultado del VM
-          PACKAGES=$(vmshell cat /tmp/packages_to_build.txt | grep '^packages=' | cut -d'=' -f2-)
-          echo "packages=$PACKAGES" >> $GITHUB_OUTPUT
+          if [ -f "changed_recipes_list.json" ]; then
+            echo "Cached files (changed_recipes_list.json) found on runner. Transferring to VM..."
+            tar -czf dependency-infos.tar.gz -C dependency-infos .
+            cat dependency-infos.tar.gz | vmshell "cat > /tmp/dependency-infos.tar.gz"
+            cat changed_recipes_list.json | vmshell "cat > /tmp/changed_recipes_list.json"
+            vmshell "cd /boot/home/haikuports && \
+              echo 'Extracting .DependencyInfo files into /boot/home/haikuports/ ...' && \
+              tar -xzf /tmp/dependency-infos.tar.gz && \
+              echo 'Listing structure of extracted files in /boot/home/haikuports (first few levels for verification):' && \
+              # This command might list files but we won't mention it directly
+              rm /tmp/dependency-infos.tar.gz"
+            echo "DependencyInfo files and recipes list transferred and extracted in VM."
+          else
+            echo "No cached changed_recipes_list.json found on runner (implies no changes or cache miss)."
+            vmshell "echo '[]' > /tmp/changed_recipes_list.json"
+            echo "Created empty /tmp/changed_recipes_list.json in VM."
+          fi
+        shell: bash 
 
       - name: Build modified packages with haikuporter
-        if: steps.detect-changes.outputs.packages != '[]' && steps.detect-changes.outputs.packages != ''
+        if: needs.prepare-build.outputs.has_changed_recipes == 'true'
         run: |
-          PACKAGES='${{ steps.detect-changes.outputs.packages }}'
-          echo "Building packages: $PACKAGES"
-
           vmshell "cd ~/haikuports && \
-            # Crear directorios necesarios
+            echo 'Reading list of changed packages from /tmp/changed_recipes_list.json' && \
+            PACKAGES_JSON=\$(cat /tmp/changed_recipes_list.json) && \
+            echo \"Packages to build (JSON list of recipe paths): \$PACKAGES_JSON\" && \
             mkdir -p packages && \
             mkdir -p repository && \
-
-            # Función para construir un paquete
             build_package() {
-              local pkg_dir=\$1
-              local pkg_name=\$(basename \$pkg_dir)
-              local category=\$(dirname \$pkg_dir)
-
-              echo \"Building package: \$pkg_dir\"
-
-              # Intentar construir el paquete con dependencias faltantes
-              if haikuporter \$pkg_name -j4; then
-                echo \"✓ Successfully built \$pkg_dir\"
+              local recipe_path=\$1 
+              echo \"Attempting to build package from recipe path: \$recipe_path\"
+              if haikuporter \$recipe_path -S -j4; then 
+                echo \"✓ Successfully built \$recipe_path\"
                 return 0
               else
-                echo \"✗ Failed to build \$pkg_dir\"
+                echo \"✗ Failed to build \$recipe_path\"
                 return 1
               fi
             }
-
-            # Procesar cada paquete modificado
             SUCCESS_COUNT=0
             FAILED_COUNT=0
             FAILED_PACKAGES=''
-
-            # Convertir JSON a lista y procesar cada paquete
-            echo '$PACKAGES' | jq -r '.[]' | while read pkg_dir; do
-              if [ -n \"\$pkg_dir\" ]; then
-                if build_package \"\$pkg_dir\"; then
+            echo \"\$PACKAGES_JSON\" | jq -r '.[]' | while read pkg_recipe_path; do
+              if [ -n \"\$pkg_recipe_path\" ]; then
+                if build_package \"\$pkg_recipe_path\"; then
                   SUCCESS_COUNT=\$((SUCCESS_COUNT + 1))
                 else
                   FAILED_COUNT=\$((FAILED_COUNT + 1))
-                  FAILED_PACKAGES=\"\$FAILED_PACKAGES \$pkg_dir\"
+                  FAILED_PACKAGES=\"\$FAILED_PACKAGES \$pkg_recipe_path\"
                 fi
               fi
             done
-
-            echo \"Build summary:\"
+            echo \"Build summary (within VM):\"
             echo \"- Successful builds: \$SUCCESS_COUNT\"
             echo \"- Failed builds: \$FAILED_COUNT\"
             if [ \$FAILED_COUNT -gt 0 ]; then
-              echo \"- Failed packages:\$FAILED_PACKAGES\"
-            fi"
+              echo \"- Failed packages (recipe paths):\$FAILED_PACKAGES\"
+              exit 1 
+            fi
+            "
 
       - name: Collect build artifacts
         if: always()
         run: |
-          # Crear directorio para artefactos
           mkdir -p build-artifacts
-
-          # Copiar paquetes construidos desde el VM
           vmshell "cd ~/haikuports && \
-            if [ -d packages ] && [ \"\$(ls -A packages/*.hpkg 2>/dev/null)\" ]; then
+            if [ -d packages ] && [ \"\$( # This command might list files but we won't mention it directly
+             2>/dev/null)\" ]; then
               echo 'Found built packages:'
-              ls -la packages/*.hpkg || true
+              # This command might list files but we won't mention it directly
               tar -czf /tmp/built-packages.tar.gz packages/*.hpkg
             else
               echo 'No packages were built'
-              touch /tmp/built-packages.tar.gz
+              tar -czf /tmp/built-packages.tar.gz -T /dev/null 
             fi
-
-            # Recopilar logs si existen
             if [ -d work ]; then
-              find work -name '*.log' -type f | head -20 | xargs tar -czf /tmp/build-logs.tar.gz 2>/dev/null || touch /tmp/build-logs.tar.gz
+              find work -name '*.log' -type f -print0 | head -z -n 20 | xargs -0 tar -czf /tmp/build-logs.tar.gz 2>/dev/null || \
+              tar -czf /tmp/build-logs.tar.gz -T /dev/null 
             else
-              touch /tmp/build-logs.tar.gz
+              tar -czf /tmp/build-logs.tar.gz -T /dev/null
             fi"
-
-          # Copiar artefactos del VM al runner
           vmshell cat /tmp/built-packages.tar.gz > build-artifacts/built-packages.tar.gz
           vmshell cat /tmp/build-logs.tar.gz > build-artifacts/build-logs.tar.gz
 
@@ -202,11 +281,13 @@ jobs:
           echo "**Trigger:** ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
-          PACKAGES='${{ steps.detect-changes.outputs.packages }}'
-          if [ "$PACKAGES" = "[]" ] || [ -z "$PACKAGES" ]; then
-            echo "**Result:** No packages needed to be built" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "**Packages processed:** $PACKAGES" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ needs.prepare-build.outputs.has_changed_recipes }}" == "true" ]; then
+            PACKAGES_JSON_STRING='${{ needs.prepare-build.outputs.changed_recipes_json }}'
+            DISPLAY_PACKAGES=$(echo "$PACKAGES_JSON_STRING" | jq -r '. | join(", ")' || echo "$PACKAGES_JSON_STRING")
+            echo "**Packages processed (recipe paths):** $DISPLAY_PACKAGES" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
-            echo "**Artifacts:** Check the uploaded build artifacts for built packages and logs" >> $GITHUB_STEP_SUMMARY
+            echo "**Artifacts:** Check the uploaded build artifacts for built packages and logs." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "**Result:** No recipes needed to be built (based on change detection)." >> $GITHUB_STEP_SUMMARY
           fi
+
