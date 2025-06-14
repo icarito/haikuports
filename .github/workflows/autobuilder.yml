@@ -10,6 +10,9 @@ on:
 jobs:
   build-haikuports:
     runs-on: ubuntu-latest
+    env:
+      VM_CPU: 4
+      VM_RAM: 15G
     container: docker.io/hectorm/qemu-haiku:latest
 
     steps:
@@ -34,7 +37,9 @@ jobs:
             libarchive libarchive_devel bzip2 bzip2_devel \
             libyaml libyaml_devel jsoncpp meson ninja \
             bash coreutils diffutils findutils gzip file \
-            which unzip zip bc less vim nano pip_python310 jq haikuporter
+            which unzip zip bc less vim nano pip_python310 jq haikuporter \
+            json_glib_devel json_glib wayland_protocols gtk_doc \
+            zstd_devel zstd
 
 #      - name: Install build dependencies and compilation tools
 #        run: |
@@ -79,7 +84,7 @@ jobs:
             echo \"Comparing against: \$BASE_REF\"
 
             # Encontrar directorios de paquetes modificados
-            CHANGED_DIRS=\$(git diff --name-only \$BASE_REF...HEAD | \
+            CHANGED_DIRS=\$(git diff --name-only \$BASE_REF...HEAD * | \
               cut -d'/' -f2 | sort -u)
             echo $CHANGED_DIRS
 
@@ -118,7 +123,7 @@ jobs:
               echo \"Building package: \$pkg_dir\"
 
               # Intentar construir el paquete con dependencias faltantes
-              if haikuporter \$pkg_name --missing-dependencies --no-source-packages; then
+              if haikuporter \$pkg_name -j4; then
                 echo \"✓ Successfully built \$pkg_dir\"
                 return 0
               else
