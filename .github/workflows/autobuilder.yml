@@ -182,6 +182,11 @@ jobs:
     container: docker.io/hectorm/qemu-haiku:latest
 
     steps:
+      - name: Checkout HaikuPorts repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Fetch all history for git operations if needed, adjust if not
+
       - name: Ensure jq is available on runner
         run: |
           apt-get update -y
