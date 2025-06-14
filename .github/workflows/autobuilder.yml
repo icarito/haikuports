@@ -13,6 +13,7 @@ jobs:
     outputs:
       changed_recipes_json: ${{ steps.detect-changes.outputs.changed_recipes_json }}
       has_changed_recipes: ${{ steps.detect-changes.outputs.has_changed_recipes }}
+      primary_branch_sha: ${{ steps.detect-changes.outputs.primary_branch_sha }}
     steps:
       - name: Checkout HaikuPorts repository
         uses: actions/checkout@v4
@@ -56,6 +57,8 @@ jobs:
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           GIT_PRIMARY_BRANCH_REF=""
+          PRIMARY_BRANCH_SHA_VALUE=""
+
           if git rev-parse --verify origin/main >/dev/null 2>&1; then
             GIT_PRIMARY_BRANCH_REF="origin/main"
           elif git rev-parse --verify origin/master >/dev/null 2>&1; then
@@ -69,6 +72,7 @@ jobs:
           else
             echo "Primary branch for comparison: $GIT_PRIMARY_BRANCH_REF"
             if [ "$GITHUB_EVENT_NAME" == "pull_request" ]; then
+              # For PRs, diff against the merge base with the target branch (already fetched by checkout@v4 with ref: ${{ github.event.pull_request.head.sha }})
               TARGET_REF="origin/$GITHUB_BASE_REF"
               git fetch origin "$GITHUB_BASE_REF" --depth=1
               MERGE_BASE=$(git merge-base HEAD "$TARGET_REF")
@@ -76,10 +80,26 @@ jobs:
               CHANGED_RECIPES=$(git diff --name-only "$MERGE_BASE" HEAD -- '*/*.recipe' | sed 's|/[^/]*\.recipe$||g' | sort -u)
             else
               echo "Push/Manual Trigger: Diffing from $GIT_PRIMARY_BRANCH_REF to HEAD ($GITHUB_SHA)"
+              # Ensure the primary branch is fetched for an accurate diff base and for rev-parse later
+              # fetch-depth:0 should get it, but this is an explicit safeguard.
+              git fetch origin "$(echo $GIT_PRIMARY_BRANCH_REF | sed 's|origin/||')" --depth=1 --no-tags || echo "::warning::Failed to fetch $GIT_PRIMARY_BRANCH_REF, diff might be inaccurate."
               CHANGED_RECIPES=$(git diff --name-only "$GIT_PRIMARY_BRANCH_REF...HEAD" -- '*/*.recipe' | sed 's|/[^/]*\.recipe$||g' | sort -u)
             fi
             echo "build_all_flag=false" >> $GITHUB_OUTPUT
           fi
+
+          if [ -n "$GIT_PRIMARY_BRANCH_REF" ]; then
+            PRIMARY_BRANCH_SHA_VALUE=$(git rev-parse "$GIT_PRIMARY_BRANCH_REF" 2>/dev/null)
+            if [ -z "$PRIMARY_BRANCH_SHA_VALUE" ]; then
+                echo "::warning::Failed to parse SHA for $GIT_PRIMARY_BRANCH_REF. Cache key will use GITHUB_SHA."
+                PRIMARY_BRANCH_SHA_VALUE="${{ github.sha }}"
+            fi
+          else
+            echo "::debug::No primary branch ref, using GITHUB_SHA for cache key."
+            PRIMARY_BRANCH_SHA_VALUE="${{ github.sha }}"
+          fi
+          echo "primary_branch_sha=${PRIMARY_BRANCH_SHA_VALUE}" >> $GITHUB_OUTPUT
+
           CHANGED_RECIPES=$(echo "$CHANGED_RECIPES" | sed '/^$/d')
 
           if [ -z "$CHANGED_RECIPES" ]; then
@@ -149,7 +169,7 @@ jobs:
           path: |
             ${{ github.workspace }}/output/repository
             changed_recipes_list.json
-          key: ${{ runner.os }}-haiku-deps-v3-${{ github.sha }} # Incremented cache key version
+          key: ${{ runner.os }}-haiku-deps-v3-${{ steps.detect-changes.outputs.primary_branch_sha }}
           restore-keys: |
             ${{ runner.os }}-haiku-deps-v3-
 
@@ -178,7 +198,7 @@ jobs:
           path: | # This path needs to align with what's cached
             ${{ github.workspace }}/output/repository 
             changed_recipes_list.json
-          key: ${{ runner.os }}-haiku-deps-v3-${{ github.sha }} # Ensure this key matches
+          key: ${{ runner.os }}-haiku-deps-v3-${{ needs.prepare-build.outputs.primary_branch_sha }}
           restore-keys: |
             ${{ runner.os }}-haiku-deps-v3-
 
@@ -344,4 +364,3 @@ jobs:
           else
             echo "**Result:** No recipes needed to be built (based on change detection in prepare-build job)." >> $GITHUB_STEP_SUMMARY
           fi
-
