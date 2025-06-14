@@ -273,25 +273,7 @@ jobs:
           vmshell "cd ~/haikuports && \
             echo 'Reading list of changed packages from /tmp/changed_recipes_list.json' && \
             PACKAGES_JSON=\$(cat /tmp/changed_recipes_list.json) && \
-            echo \"Packages to build (JSON list of recipe paths): \$P            - name: Cache .DependencyInfo files and changed recipes list
-              id: cache-deps
-              uses: actions/cache@v4
-              with:
-                path: |
-                  ${{ github.workspace }}/repository
-                key: ${{ runner.os }}-haiku-deps-v3-${{ steps.detect-changes.outputs.primary_branch_sha }}
-                restore-keys: |
-                  ${{ runner.os }}-haiku-deps-v3-
-            
-            - name: Restore cached DependencyInfo files and recipes list
-              id: restore-cache
-              uses: actions/cache@v4
-              with:
-                path: | # This path needs to align with what's cached
-                  ${{ github.workspace }}/repository
-              key: ${{ runner.os }}-haiku-deps-v3-${{ needs.prepare-build.outputs.primary_branch_sha }}
-              restore-keys: |
-                ${{ runner.os }}-haiku-deps-v3-ACKAGES_JSON\" && \
+            echo \"Packages to build (JSON list of recipe paths): \$PACKAGES_JSON\" && \
             \
             mkdir -p packages && \
             mkdir -p repository && \
