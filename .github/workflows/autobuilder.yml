@@ -36,18 +36,16 @@ jobs:
         run: |
           echo "TREE_PATH=\"${{ github.workspace }}\"" > "${{ github.workspace }}/haikuports.conf"
           echo "PACKAGER=\"CI Builder <ci@example.com>\"" >> "${{ github.workspace }}/haikuports.conf"
-          echo "TARGET_ARCHITECTURE=\"x86_64\"" >> "${{ github.workspace }}/haikuports.conf"
-          echo "HaikuPorter configuration created at ${{ github.workspace }}/haikuports.conf:"
           cat "${{ github.workspace }}/haikuports.conf"
         shell: bash
 
-      - name: Download Haiku Licenses
-        run: |
-          wget https://github.com/waddlesplash/haiku-licenses/archive/master.zip -O haiku-licenses.zip
-          unzip -q haiku-licenses.zip
-          echo "Haiku Licenses downloaded and unzipped. Found directories:"
-          ls -d ${{ github.workspace }}/haiku-licenses-*/ # Verify directory name relative to workspace
-        shell: bash
+#      - name: Download Haiku Licenses
+#        run: |
+#          wget https://github.com/waddlesplash/haiku-licenses/archive/master.zip -O haiku-licenses.zip
+#          unzip -q haiku-licenses.zip
+#          echo "Haiku Licenses downloaded and unzipped. Found directories:"
+#          ls -d ${{ github.workspace }}/haiku-licenses-*/ # Verify directory name relative to workspace
+#        shell: bash
 
       - name: Detect modified recipes
         id: detect-changes
@@ -93,68 +91,34 @@ jobs:
           fi
         shell: bash
 
-      - name: Update Repository and Stage Dependency Infos
-        id: generate-deps
-        if: steps.detect-changes.outputs.has_changed_recipes == 'true'
-        run: |
-          echo "Updating HaikuPorter repository to generate/update all .DependencyInfo files..."
-          # Dynamically find the unzipped license directory name relative to workspace
-          LICENSES_DIR_NAME=$(ls -d ${{ github.workspace }}/haiku-licenses-*/ | head -n 1 | xargs basename)
-          echo "Using licenses directory: $LICENSES_DIR_NAME at ${{ github.workspace }}/$LICENSES_DIR_NAME"
-
-          haikuporter --config="${{ github.workspace }}/haikuports.conf"                     --licenses="${{ github.workspace }}/$LICENSES_DIR_NAME"                     --repository-update
-
-          echo "Checking contents of changed recipe directories after --repository-update:"
-          CHECK_CHANGED_RECIPES_JSON='${{ steps.detect-changes.outputs.changed_recipes_json }}'
-          if [ "$CHECK_CHANGED_RECIPES_JSON" == "[]" ] || [ -z "$CHECK_CHANGED_RECIPES_JSON" ]; then
-            echo "No changed recipes were detected by the previous step."
-          else
-            echo "$CHECK_CHANGED_RECIPES_JSON" | jq -r '.[]' | while read recipe_path_to_check; do
-              if [ -n "$recipe_path_to_check" ]; then
-                CHECK_DIR="${{ github.workspace }}/$recipe_path_to_check"
-                if [ -d "$CHECK_DIR" ]; then
-                  echo "Listing contents of $CHECK_DIR:"
-                  ls -la "$CHECK_DIR"
-                else
-                  echo "::warning::Directory not found for checking: $CHECK_DIR"
-                fi
-              fi
-            done
-          fi
-
-          echo "Collecting .DependencyInfo files for specifically changed recipes..."
-          mkdir -p dependency-infos # This is the staging directory for caching
-
-          CHANGED_RECIPES_JSON='${{ steps.detect-changes.outputs.changed_recipes_json }}'
-          if [ "$CHANGED_RECIPES_JSON" == "[]" ] || [ -z "$CHANGED_RECIPES_JSON" ]; then
-            echo "No changed recipes list provided by detect-changes step, nothing to collect for cache."
-          else
-            echo "$CHANGED_RECIPES_JSON" | jq -r '.[]' | while read recipe_path; do
-              if [ -n "$recipe_path" ]; then
-                SOURCE_RECIPE_DIR="${{ github.workspace }}/$recipe_path"
-                TARGET_CACHE_SUBDIR="dependency-infos/$recipe_path" # Staging subdir for this recipe's deps
-
-                echo "Staging .DependencyInfo files from $SOURCE_RECIPE_DIR for recipe $recipe_path"
-                if [ -d "$SOURCE_RECIPE_DIR" ]; then
-                  mkdir -p "$TARGET_CACHE_SUBDIR"
-                  # Copy .DependencyInfo files from the main tree (updated by --repository-update)
-                  # to the staging area for caching.
-                  # Use a subshell for find to avoid error if no files found.
-                  (find "$SOURCE_RECIPE_DIR" -maxdepth 1 -name "*.DependencyInfo" -print -exec cp {} "$TARGET_CACHE_SUBDIR/" \;)
-                  if [ "$(ls -A $TARGET_CACHE_SUBDIR 2>/dev/null)" ]; then
-                     echo "Successfully staged .DependencyInfo files from $SOURCE_RECIPE_DIR to $TARGET_CACHE_SUBDIR"
-                  else
-                     echo "No .DependencyInfo files found or copied from $SOURCE_RECIPE_DIR for $recipe_path"
-                  fi
-                else
-                  echo "::warning::Source recipe directory not found: $SOURCE_RECIPE_DIR for changed recipe $recipe_path. Cannot stage .DependencyInfo files."
-                fi
-              fi
-            done
-          fi
-          echo "Listing content of dependency-infos (staged for cache):"
-          ls -R dependency-infos
-        shell: bash
+#      - name: Ensure All Dependency Infos in Output Repository
+#        id: generate-deps
+#        if: steps.detect-changes.outputs.has_changed_recipes == 'true'
+#        run: |
+#          echo "Ensuring all necessary .DependencyInfo files are in ${{ github.workspace }}/output/repository/ ..."
+#          LICENSES_DIR_NAME=$(ls -d ${{ github.workspace }}/haiku-licenses-*/ | head -n 1 | xargs basename)
+#          echo "Using licenses directory: $LICENSES_DIR_NAME at ${{ github.workspace }}/$LICENSES_DIR_NAME"
+#
+#          # Create directories needed by HaikuPorter and for dummy flags
+#          mkdir -p "${{ github.workspace }}/output/packages"
+#          mkdir -p "${{ github.workspace }}/output/repository" # This is our target REPOSITORY_PATH
+#          mkdir -p "${{ github.workspace }}/dummy_mimedb"
+#          mkdir -p "${{ github.workspace }}/dummy_cross_tools"
+#
+#          echo "Running global 'haikuporter --repository-update' to populate ${{ github.workspace }}/output/repository/ ..."
+#          haikuporter --config="${{ github.workspace }}/haikuports.conf"                  --licenses="${{ github.workspace }}/$LICENSES_DIR_NAME"                  --repository-update
+#
+#          HP_GLOBAL_UPDATE_EXIT_CODE=$?
+#          if [ $HP_GLOBAL_UPDATE_EXIT_CODE -ne 0 ]; then
+#            echo "::warning::Global 'haikuporter --repository-update' failed with exit code $HP_GLOBAL_UPDATE_EXIT_CODE. Will rely on individual generation for changed recipes."
+#          else
+#            echo "Global 'haikuporter --repository-update' completed."
+#          fi
+#
+#          echo "----------------------------------------------------------------------"
+#          echo "Final listing of consolidated REPOSITORY_PATH (${{ github.workspace }}/output/repository/) before caching:"
+#          ls -R "${{ github.workspace }}/output/repository/"
+#        shell: bash
 
       - name: Save changed recipes list to a file for caching
         if: steps.detect-changes.outputs.has_changed_recipes == 'true'
@@ -168,9 +132,11 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            dependency-infos
+            ${{ github.workspace }}/output/repository
             changed_recipes_list.json
-          key: ${{ runner.os }}-haiku-deps-${{ github.sha }}
+          key: ${{ runner.os }}-haiku-deps-v3-${{ github.sha }} # Incremented cache key version
+          restore-keys: |
+            ${{ runner.os }}-haiku-deps-v3-
 
   build-haikuports: 
     runs-on: ubuntu-latest
@@ -253,40 +219,37 @@ jobs:
             echo 'Reading list of changed packages from /tmp/changed_recipes_list.json' && \
             PACKAGES_JSON=\$(cat /tmp/changed_recipes_list.json) && \
             echo \"Packages to build (JSON list of recipe paths): \$PACKAGES_JSON\" && \
+            \
             mkdir -p packages && \
             mkdir -p repository && \
-            build_package() {
-              local recipe_path=\$1 
-              echo \"Attempting to build package from recipe path: \$recipe_path\"
-              if haikuporter \$recipe_path -S -j4; then 
-                echo \"✓ Successfully built \$recipe_path\"
-                return 0
-              else
-                echo \"✗ Failed to build \$recipe_path\"
-                return 1
-              fi
-            }
-            SUCCESS_COUNT=0
-            FAILED_COUNT=0
-            FAILED_PACKAGES=''
-            echo \"\$PACKAGES_JSON\" | jq -r '.[]' | while read pkg_recipe_path; do
-              if [ -n \"\$pkg_recipe_path\" ]; then
-                if build_package \"\$pkg_recipe_path\"; then
-                  SUCCESS_COUNT=\$((SUCCESS_COUNT + 1))
-                else
-                  FAILED_COUNT=\$((FAILED_COUNT + 1))
-                  FAILED_PACKAGES=\"\$FAILED_PACKAGES \$pkg_recipe_path\"
-                fi
-              fi
-            done
-            echo \"Build summary (within VM):\"
-            echo \"- Successful builds: \$SUCCESS_COUNT\"
-            echo \"- Failed builds: \$FAILED_COUNT\"
-            if [ \$FAILED_COUNT -gt 0 ]; then
-              echo \"- Failed packages (recipe paths):\$FAILED_PACKAGES\"
-              exit 1 
-            fi
-            "
+            \
+            # Convert JSON array to a space-separated string of shell-escaped arguments
+            RECIPE_ARGS_STRING=\$(echo \"\$PACKAGES_JSON\" | jq -r '. | @sh')
+            \
+            if [ -z \"\$RECIPE_ARGS_STRING\" ] || [ \"\$RECIPE_ARGS_STRING\" = \"''\" ] || [ \"\$RECIPE_ARGS_STRING\" = \"'[]'\" ]; then \
+              echo 'No packages specified in the list to build.' ; \
+            else \
+              echo \"Executing haikuporter with args: \$RECIPE_ARGS_STRING\" ; \
+              # Use eval to correctly parse the space-separated, potentially quoted arguments
+              if eval \"haikuporter \$RECIPE_ARGS_STRING -S -j4\"; then \
+                echo \"✓ HaikuPorter command for batch build completed successfully.\" ; \
+              else \
+                BUILD_FAILURE_CODE=\$? ; \
+                echo \"✗ HaikuPorter command for batch build failed with exit code \$BUILD_FAILURE_CODE.\" ; \
+                # Exit the vmshell script with the failure code, which will fail the GitHub Actions step
+                exit \$BUILD_FAILURE_CODE ; \
+              fi ; \
+            fi ; \
+            \
+            echo \"Build summary (within VM):\" ; \
+            NUM_PACKAGES=\$(echo \"\$PACKAGES_JSON\" | jq -r '. | length') ; \
+            echo \"- Packages in batch: \$NUM_PACKAGES\" ; \
+            if [ -z \"\$RECIPE_ARGS_STRING\" ] || [ \"\$RECIPE_ARGS_STRING\" = \"''\" ] || [ \"\$RECIPE_ARGS_STRING\" = \"'[]'\" ]; then \
+                echo \"No packages were attempted.\" ; \
+            else \
+                # If the script reaches here, the haikuporter command must have succeeded (due to 'exit' on failure)
+                echo \"Batch build attempt reported success by HaikuPorter exit code.\" ; \
+            fi"
 
       - name: Collect build artifacts
         if: always()
