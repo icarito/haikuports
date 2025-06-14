@@ -16,25 +16,30 @@ jobs:
       - name: Wait until the VM is ready
         run: container-init & timeout 600 vmshell exit 0
 
+#      - name: Install build dependencies and compilation tools
+#        run: |
+#          # Instalar paquetes esenciales de compilación basados en la lista del usuario
+#          vmshell pkgman install -y \
+#            gcc binutils make cmake autoconf automake \
+#            bison flex gawk gettext git gmp gperf grep \
+#            libtool m4 nasm ncurses6 patch pkgconf \
+#            python3.10 sed tar xz_utils zlib zlib_devel \
+#            curl curl_devel openssl3 openssl3_devel \
+#            glib2 glib2_devel gtk3 gtk3_devel cairo1.18 cairo1.18_devel \
+#            fontconfig fontconfig_devel freetype freetype_devel \
+#            harfbuzz harfbuzz_devel pango pango_devel \
+#            expat libffi libffi_devel libxml2 libxml2_devel \
+#            libxslt libpcre libpcre_devel libpng16 libpng16_devel \
+#            libjpeg_turbo libjpeg_turbo_devel tiff tiff_devel \
+#            libarchive libarchive_devel bzip2 bzip2_devel \
+#            libyaml libyaml_devel jsoncpp meson ninja \
+#            bash coreutils diffutils findutils gzip file \
+#            which unzip zip bc less vim nano pip_python310 jq
+
       - name: Install build dependencies and compilation tools
         run: |
           # Instalar paquetes esenciales de compilación basados en la lista del usuario
-          vmshell pkgman install -y \
-            gcc binutils make cmake autoconf automake \
-            bison flex gawk gettext git gmp gperf grep \
-            libtool m4 nasm ncurses6 patch pkgconf \
-            python3.10 sed tar xz_utils zlib zlib_devel \
-            curl curl_devel openssl3 openssl3_devel \
-            glib2 glib2_devel gtk3 gtk3_devel cairo1.18 cairo1.18_devel \
-            fontconfig fontconfig_devel freetype freetype_devel \
-            harfbuzz harfbuzz_devel pango pango_devel \
-            expat libffi libffi_devel libxml2 libxml2_devel \
-            libxslt libpcre libpcre_devel libpng16 libpng16_devel \
-            libjpeg_turbo libjpeg_turbo_devel tiff tiff_devel \
-            libarchive libarchive_devel bzip2 bzip2_devel \
-            libyaml libyaml_devel jsoncpp meson ninja \
-            bash coreutils diffutils findutils gzip file \
-            which unzip zip bc less vim nano pip_python310 jq
+          vmshell pkgman install -y jq haikuporter
 
       - name: Checkout HaikuPorts repository in VM
         run: |
@@ -73,14 +78,8 @@ jobs:
 
             # Encontrar directorios de paquetes modificados
             CHANGED_DIRS=\$(git diff --name-only \$BASE_REF...HEAD | \
-              grep -E '^[^/]+/[^/]+/' | \
-              cut -d'/' -f1-2 | \
-              sort -u | \
-              while read dir; do
-                if [ -d \"\$dir\" ] && ls \"\$dir\"/*.recipe >/dev/null 2>&1; then
-                  echo \"\$dir\"
-                fi
-              done)
+              cut -d'/' -f2 | sort -u)
+            echo $CHANGED_DIRS
 
             if [ -z \"\$CHANGED_DIRS\" ]; then
               echo 'No packages to build'
