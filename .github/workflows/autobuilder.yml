@@ -276,6 +276,7 @@ jobs:
           docker exec haiku-vm vmshell "echo 'TREE_PATH=\"/boot/home/haikuports\"' > /boot/home/config/settings/haikuports.conf"
           docker exec haiku-vm vmshell "echo 'PACKAGER=\"GitHub Actions Builder <actions@github.com>\"' >> /boot/home/config/settings/haikuports.conf"
           docker exec haiku-vm vmshell "echo 'TARGET_ARCHITECTURE=\"x86_64\"' >> /boot/home/config/settings/haikuports.conf"
+          docker exec haiku-vm vmshell "echo 'RecipeFormatVersion=1' > ~/haikuports/FormatVersions"
 
           echo "--- Transferring cached dependency files to VM ---"
           if [ -d "repository" ]; then
@@ -294,7 +295,6 @@ jobs:
       - name: Build modified packages with haikuporter
         id: build-packages
         run: |
-          echo "=== DEBUG: Checking files in VM before build ==="
           docker exec haiku-vm vmshell "cd /boot/home/haikuports && \
             echo 'Reading list of changed packages' && \
             RECIPE_ARGS='${{ needs.prepare-build.outputs.changed_recipes_space_separated }}' && \
