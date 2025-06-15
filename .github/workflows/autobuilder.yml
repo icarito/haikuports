@@ -240,7 +240,6 @@ jobs:
             echo 'Reading list of changed packages' && \
             RECIPE_ARGS='${{ needs.prepare-build.outputs.changed_recipes_space_separated }}' && \
             echo \"Changed packages: \$RECIPE_ARGS\" && \
-            echo \"Building packages: $RECIPE_ARGS\" ; \
             if haikuporter $RECIPE_ARGS -j4 --no-repository-update; then \
               echo \"✓ HaikuPorter build completed successfully.\" ; \
             else \
