@@ -33,20 +33,19 @@ Assumptions:
   - The script is run from the root directory of a standard HaikuPorts checkout.
   - Recipe files (`.recipe`) are located in '<category>/<package_name_dir>/'
     directories (e.g., 'dev-libs/openssl/openssl-1.1.1t.recipe').
-    The <package_name_dir> is what `normalize_package_name_for_find` resolves to.
   - Category directories are identifiable by containing a hyphen in their name
     (e.g., "dev-libs", "app-text").
 
 Key Steps:
-  1. Dynamic Category Discovery: Finds category directories within the HaikuPorts root.
-  2. Recipe File Location: Locates recipe files based on normalized package names.
-  3. Recipe Parsing: Extracts dependencies from BUILD_REQUIRES and BUILD_PREREQUIRES
-     sections, handling multi-line definitions and comments.
-  4. Name Cleaning & Prefix Retention: Cleans dependency names by stripping versions,
+  1. Index Building: Creates an in-memory index of all `PROVIDES` items from all recipes.
+  2. Initial Package Resolution: Maps user-provided package names to recipe files using the index.
+  3. Recipe Parsing: Extracts `PROVIDES`, `BUILD_REQUIRES`, and `BUILD_PREREQUIRES`
+     sections from recipe files.
+  4. Name Cleaning & Prefix Retention: Cleans item names by stripping versions,
      architecture suffixes, and Haiku-specific variables, while *retaining*
-     functional prefixes (cmd:, lib:, devel:).
-  5. Recursive Resolution: Traverses the dependency graph to find all direct and
-     indirect dependencies, avoiding cycles.
+     functional prefixes (cmd:, lib:, devel:, package:, etc.).
+  5. Recursive Resolution: Traverses the dependency graph using the `provides_index`
+     to find all direct and indirect dependencies, avoiding cycles by tracking processed recipe paths.
   6. Output Generation: Lists the final set of unique dependencies, excluding initial inputs.
 """
 
@@ -57,82 +56,18 @@ import sys
 
 # Constants for HaikuPorts directory structure (adjust if necessary)
 HAIKUPORTS_ROOT = "." # Assuming the script is run from the root of haikuports clone
-# RECIPE_CATEGORIES list is removed, will be detected dynamically.
 
-def find_recipe_file(package_name):
-    """
-    Finds the recipe file for a given (normalized) package directory name.
-
-    It dynamically scans `HAIKUPORTS_ROOT` for category-like directories
-    (directories assumed to contain a hyphen, e.g., "dev-libs", "app-arch").
-    Then, it searches for a sub-directory matching `package_name` within each category.
-    Inside this package directory, it looks for any file ending with ".recipe".
-
-    Args:
-        package_name (str): The normalized name of the package directory
-                            (e.g., "openssl", "python"). This name is typically
-                            the output of `normalize_package_name_for_find`.
-
-    Returns:
-        str: The full path to the first found recipe file (sorted alphabetically if multiple exist),
-             or None if no recipe file is found.
-    """
-    # print(f"find_recipe_file: Attempting to find recipe for package directory: {package_name}") # Verbose
-
-    dynamically_found_categories = []
-    try:
-        for entry in os.listdir(HAIKUPORTS_ROOT):
-            if os.path.isdir(os.path.join(HAIKUPORTS_ROOT, entry)) and '-' in entry:
-                dynamically_found_categories.append(entry)
-    except OSError as e:
-        print(f"Error listing root directory {HAIKUPORTS_ROOT} to find categories: {e}", file=sys.stderr)
-        return None
-
-    if not dynamically_found_categories:
-        print(f"No category-like directories (containing '-') found in {HAIKUPORTS_ROOT}.", file=sys.stderr)
-        return None
-
-    for category in dynamically_found_categories:
-        package_dir_path = os.path.join(HAIKUPORTS_ROOT, category, package_name)
-        if os.path.isdir(package_dir_path):
-            try:
-                # Attempt to find a recipe file. HaikuPorts convention is often <packageName>-<version>.recipe.
-                # Some packages might have multiple .recipe files (e.g. different versions or variants).
-
-                recipe_files_in_dir = [f for f in os.listdir(package_dir_path) if f.endswith(".recipe")]
-
-                if not recipe_files_in_dir:
-                    continue # No recipe files in this directory, try next category.
-
-                # Prioritize a recipe that starts with the package_name (if package_name is specific, e.g., "expat").
-                # This helps in cases like "expat" directory having "expat-2.5.0.recipe".
-                for r_file in recipe_files_in_dir:
-                    if r_file.startswith(package_name):
-                        found_path = os.path.join(package_dir_path, r_file)
-                        # print(f"find_recipe_file: Found specific recipe (startswith match): {found_path}") # Verbose
-                        return found_path
-
-                # Fallback: return the first .recipe file found in the directory (alphabetically sorted).
-                # This is the most common path for normalized package_names (e.g., package_name="python"
-                # would find "python3.10-3.10.18.recipe" or similar).
-                found_path = os.path.join(package_dir_path, sorted(recipe_files_in_dir)[0])
-                # print(f"find_recipe_file: Found generic recipe (first .recipe match): {found_path}") # Verbose
-                return found_path
-            except OSError as e:
-                print(f"Error: Could not read package directory {package_dir_path}: {e}", file=sys.stderr)
-                continue # Try next category
-
-    # print(f"find_recipe_file: Recipe for package directory '{package_name}' not found in any category.", file=sys.stderr) # Verbose
-    return None
-
+# Note: find_recipe_file and normalize_package_name_for_find have been removed.
+# Recipe lookups are now primarily done via the provides_index.
+# build_provides_index uses its own file scanning logic.
 
 def parse_recipe(recipe_path):
     """
-    Parses a HaikuPorts .recipe file to extract build dependencies.
+    Parses a HaikuPorts .recipe file to extract PROVIDES, BUILD_REQUIRES,
+    and BUILD_PREREQUIRES sections.
 
-    It looks for BUILD_REQUIRES and BUILD_PREREQUIRES sections, handling
-    multi-line variable definitions (lines ending with '\\').
-    Dependency strings are cleaned by:
+    It handles multi-line variable definitions (lines ending with '\\' or quoted
+    multi-line strings). Item strings are cleaned by:
     - Retaining prefixes like "cmd:", "lib:", "devel:".
     - Removing version specifications (e.g., ">=1.0", "==1.2.3").
     - Removing Haiku-specific variables like "$secondaryArchSuffix".
@@ -142,316 +77,279 @@ def parse_recipe(recipe_path):
         recipe_path (str): The full path to the .recipe file.
 
     Returns:
-        set: A set of unique, cleaned dependency names (strings),
-             with prefixes retained. Returns an empty set on error.
+        dict: A dictionary with keys 'provides', 'build_requires',
+              'build_prerequires', each mapping to a set of unique,
+              cleaned item names (strings) with prefixes retained.
+              Returns a dictionary with empty sets on error.
     """
-    # print(f"parse_recipe: Parsing recipe {recipe_path}...") # Verbose
-    dependencies = set()
+    provides_set = set()
+    build_requires_set = set()
+    build_prerequires_set = set()
+
+    block_to_set_map = {
+        "PROVIDES": provides_set,
+        "BUILD_REQUIRES": build_requires_set,
+        "BUILD_PREREQUIRES": build_prerequires_set,
+    }
+
+    active_block_var_name = None
     current_block_content = ""
-    in_block = False
-    block_type = None # "BUILD_REQUIRES" or "BUILD_PREREQUIRES"
+    in_block_definition = False
+    line_number = 0
 
     try:
-        with open(recipe_path, 'r') as f:
+        with open(recipe_path, 'r', encoding='utf-8', errors='ignore') as f:
             for line_number, line_text in enumerate(f, 1):
                 stripped_line = line_text.strip()
 
-                if stripped_line.startswith("#") or not stripped_line: # Skip comments and empty lines
-                    if not in_block: # if we are not in a block, comments are fine
-                        continue
-                    # If inside a block, comments might terminate the block or be part of a multi-line value
-                    # For simplicity, we'll assume comments on their own line inside a block are not part of the value list
-                    # and that inline comments will be handled during per-dependency cleaning.
+                if not stripped_line or (stripped_line.startswith("#") and not in_block_definition) :
+                    continue
 
-                if in_block:
-                    # Continuing a block
-                    # Remove inline comments first from the line being appended
-                    line_text_no_inline_comment = line_text.split('#', 1)[0].rstrip()
+                if not in_block_definition:
+                    for block_name in block_to_set_map.keys():
+                        if stripped_line.startswith(block_name + "="):
+                            active_block_var_name = block_name
+                            value_part = stripped_line.split("=", 1)[1].lstrip()
+                            value_part_no_comment = value_part.split('#', 1)[0].rstrip()
 
-                    if line_text_no_inline_comment.endswith('\\'):
-                        current_block_content += line_text_no_inline_comment[:-1].strip() + " " # Add with space, remove backslash
-                    else:
-                        # End of block
-                        current_block_content += line_text_no_inline_comment.strip()
-                        in_block = False
-                else:
-                    # Check for new block start
-                    if stripped_line.startswith("BUILD_REQUIRES=") or \
-                       stripped_line.startswith("BUILD_PREREQUIRES="):
-                        in_block = True
-                        block_type = stripped_line.split('=',1)[0]
-                        content_after_equals = stripped_line.split('=', 1)[1].strip()
-
-                        # Remove inline comments from the first line of the block
-                        content_after_equals = content_after_equals.split('#', 1)[0].rstrip()
-
-                        current_block_content = "" # Reset for new block. Crucial for VAR=" then newline cases.
-
-                        if content_after_equals == '"':
-                            # This is the case: VAR=" (content starts on the next line)
-                            # current_block_content remains empty, in_block is True.
-                            # Subsequent lines in the 'elif in_block:' clause will append.
-                            pass
-                        elif content_after_equals.startswith('"') and content_after_equals.endswith('\\"'):
-                            # This is VAR="value \\" (escaped quote, continued) - unlikely for HaikuPorts but robust
-                            current_block_content = content_after_equals[1:-2].strip() + " " # remove quote and backslash-quote
-                        elif content_after_equals.startswith('"') and content_after_equals.endswith('"'):
-                            # This is VAR="value" (single line quoted)
-                            current_block_content = content_after_equals[1:-1].strip()
-                            in_block = False # Process this single line block immediately
-                        elif content_after_equals.startswith('"'):
-                            # This is VAR="value (possibly continued without \ but relying on quote)
-                            # Or VAR="value \ (shell continuation)
-                            current_block_content = content_after_equals[1:] # Remove leading quote
-                            if current_block_content.endswith('\\'):
-                                current_block_content = current_block_content[:-1].strip() + " "
+                            if value_part_no_comment.startswith('"'):
+                                current_block_content = value_part_no_comment[1:]
+                                if current_block_content.endswith('"') and not current_block_content.endswith('\\"'):
+                                    current_block_content = current_block_content[:-1]
+                                    in_block_definition = False
+                                else:
+                                    in_block_definition = True
+                                    if current_block_content.endswith('\\'):
+                                         current_block_content = current_block_content[:-1].strip() + " "
+                                    else:
+                                         current_block_content += " "
+                            elif value_part_no_comment.endswith('\\'):
+                                current_block_content = value_part_no_comment[:-1].strip() + " "
+                                in_block_definition = True
                             else:
-                                # No line continuation via '\', but quote is open. Add space for next line.
-                                current_block_content += " "
-                            # in_block remains True
-                        elif content_after_equals.endswith('\\'):
-                            # This is VAR=value \ (unquoted, multi-line via shell backslash)
-                            current_block_content = content_after_equals[:-1].strip() + " "
-                        else:
-                            # This is VAR=value (unquoted, single line) or potentially start of unquoted multi-line block
-                            # if the recipe format is unusual. For HaikuPorts, BUILD_REQUIRES are typically quoted.
-                            current_block_content = content_after_equals
-                            in_block = False # Process this single line block immediately
+                                current_block_content = value_part_no_comment
+                                in_block_definition = False
+                            break
+                else:
+                    line_to_add = stripped_line.split('#', 1)[0].rstrip()
+                    if (line_to_add.endswith('"') and not line_to_add.endswith('\\"')) or \
+                       (line_to_add == '"' and current_block_content.strip()):
+                        current_block_content += line_to_add[:-1].strip() if line_to_add != '"' else ""
+                        in_block_definition = False
+                    elif line_to_add.endswith('\\'):
+                        current_block_content += line_to_add[:-1].strip() + " "
+                    else:
+                        current_block_content += line_to_add + " "
 
-                if not in_block and current_block_content.strip(): # Ensure there's content to process
-                    # Process the collected block content
-                    processed_content = current_block_content.strip()
+                if not in_block_definition and current_block_content.strip():
+                    target_set = block_to_set_map.get(active_block_var_name)
+                    if target_set is not None:
+                        final_content = current_block_content.strip()
+                        if final_content.startswith('"') and final_content.endswith('"') and len(final_content) > 1:
+                            final_content = final_content[1:-1]
+                        elif final_content.startswith("'") and final_content.endswith("'") and len(final_content) > 1:
+                            final_content = final_content[1:-1]
 
-                    # Remove surrounding quotes from the *entire collected block* if they haven't been handled yet
-                    # This primarily handles the case where the block was VAR="\n val1\n val2\n" (content started on new line)
-                    if processed_content.startswith('"') and processed_content.endswith('"'):
-                        processed_content = processed_content[1:-1].strip()
-                    elif processed_content.startswith("'") and processed_content.endswith("'"): # Also handle single quotes
-                        processed_content = processed_content[1:-1].strip()
+                        raw_items = final_content.split()
+                        for raw_item in raw_items:
+                            cleaned_item = _clean_recipe_item(raw_item)
+                            if cleaned_item:
+                                target_set.add(cleaned_item)
 
-                    raw_deps = processed_content.split() # Split by whitespace
+                    active_block_var_name = None
+                    current_block_content = ""
 
-                    for dep_item in raw_deps:
-                        dep_item = dep_item.strip()
-                        if not dep_item or dep_item.startswith('#'): # Skip empty or comments
-                            continue
-
-                            continue
-
-                        # Retain prefixes (cmd:, lib:, devel:) but process the rest
-                        prefix = ""
-                        name_part = dep_item
-                        if name_part.startswith(("cmd:", "lib:", "devel:", "hpkg:", "data:", "source:")):
-                            parts = name_part.split(":", 1)
-                            prefix = parts[0] + ":"
-                            name_part = parts[1] if len(parts) > 1 else ""
-
-                        # Remove version specifications and anything after (e.g., comments, options)
-                        version_specifiers = ['==', '>=', '<=', '>', '<', '~=', '!=']
-                        for spec in version_specifiers:
-                            if spec in name_part:
-                                name_part = name_part.split(spec)[0]
-                        name_part = name_part.split(' ')[0] # Handle cases like 'pkg # comment' or 'pkg ; option'
-
-                        # Remove $secondaryArchSuffix explicitly and other variables
-                        name_part = name_part.replace("$secondaryArchSuffix", "")
-                        name_part = name_part.replace("${secondaryArchSuffix}", "")
-                        name_part = name_part.replace("$arch", "")
-                        name_part = name_part.replace("${arch}", "")
-                        name_part = name_part.replace("$effectiveTargetArchitecture", "")
-                        name_part = name_part.replace("${effectiveTargetArchitecture}", "")
-
-                        # Remove common arch/build suffixes
-                        suffixes_to_strip = [
-                            "_x86_gcc2", "_x86", "_host", "_build", "_source_kit",
-                            "_cross", "_bootstrap", "_tools", "_devel",
-                        ]
-                        for suffix in suffixes_to_strip:
-                            if name_part.endswith(suffix):
-                                name_part = name_part[:-len(suffix)]
-
-                        # Reconstruct the cleaned name with its original prefix
-                        cleaned_dep_with_prefix = prefix + name_part
-
-                        # Filter out 'haiku' itself (with or without prefix), empty names, or other placeholders
-                        if name_part and name_part != "haiku" and not name_part.startswith('$') \
-                           and name_part not in ["none", "any", "set", "yes", "no", "true", "false"]:
-                            dependencies.add(cleaned_dep_with_prefix)
-
-                    current_block_content = "" # Reset for the next block
-                    block_type = None
-
-            # After loop, if still in_block (e.g. file ends with unclosed quote or backslash), process remaining content
-            if in_block and current_block_content.strip():
-                # print(f"parse_recipe: Processing remaining block content for {block_type}: '{current_block_content}'", file=sys.stderr) # Verbose
-                processed_content = current_block_content.strip()
-                if processed_content.startswith('"') and processed_content.endswith('"'): # Should already be handled if block ended correctly
-                    processed_content = processed_content[1:-1].strip()
-                elif processed_content.startswith("'") and processed_content.endswith("'"):
-                    processed_content = processed_content[1:-1].strip()
-                # If only a leading quote was present (e.g. VAR=" val \n val"), rstrip the final quote if it's there
-                if current_block_content.startswith('"') and processed_content.endswith('"'): # Check original start vs current end
-                     processed_content = processed_content[:-1].strip()
-
-
-                raw_deps = processed_content.split()
-                for dep_item_raw in raw_deps:
-                    dep_item_val = dep_item_raw.strip()
-                    if not dep_item_val or dep_item_val.startswith('#'): continue
-
-                    prefix = ""
-                    name_part = dep_item_val
-                    if name_part.startswith(("cmd:", "lib:", "devel:", "hpkg:", "data:", "source:")):
-                        parts = name_part.split(":", 1)
-                        prefix = parts[0] + ":"
-                        name_part = parts[1] if len(parts) > 1 else ""
-
-                    version_specifiers = ['==', '>=', '<=', '>', '<', '~=', '!=']
-                    for spec in version_specifiers:
-                        if spec in name_part: name_part = name_part.split(spec)[0]
-                    name_part = name_part.split(' ')[0]
-                    name_part = name_part.replace("$secondaryArchSuffix", "").replace("${secondaryArchSuffix}", "")
-                    name_part = name_part.replace("$arch", "").replace("${arch}", "")
-                    name_part = name_part.replace("$effectiveTargetArchitecture", "").replace("${effectiveTargetArchitecture}", "")
-                    suffixes_to_strip = ["_x86_gcc2", "_x86", "_host", "_build", "_source_kit", "_cross", "_bootstrap", "_tools", "_devel"]
-                    for suffix in suffixes_to_strip:
-                        if name_part.endswith(suffix): name_part = name_part[:-len(suffix)]
-
-                    cleaned_dep_with_prefix = prefix + name_part
-                    if name_part and name_part != "haiku" and not name_part.startswith('$') and \
-                       name_part not in ["none", "any", "set", "yes", "no", "true", "false"]:
-                        dependencies.add(cleaned_dep_with_prefix)
+            if in_block_definition and current_block_content.strip() and active_block_var_name:
+                target_set = block_to_set_map.get(active_block_var_name)
+                if target_set is not None:
+                    final_content = current_block_content.strip()
+                    if final_content.startswith('"') and final_content.endswith('"') and len(final_content) > 1: final_content = final_content[1:-1]
+                    elif final_content.startswith("'") and final_content.endswith("'") and len(final_content) > 1: final_content = final_content[1:-1]
+                    raw_items = final_content.split()
+                    for raw_item in raw_items:
+                        cleaned_item = _clean_recipe_item(raw_item)
+                        if cleaned_item: target_set.add(cleaned_item)
 
     except FileNotFoundError:
         print(f"Error: Recipe file '{recipe_path}' not found.", file=sys.stderr)
-        return set() # Return empty set on error
     except Exception as e:
-        print(f"Error parsing recipe {recipe_path} (line {line_number}): {e}", file=sys.stderr)
-        return set() # Return empty set on error
+        print(f"Error parsing recipe {recipe_path} (around line {line_number}): {e}", file=sys.stderr)
 
-    return dependencies
+    return {
+        'provides': provides_set,
+        'build_requires': build_requires_set,
+        'build_prerequires': build_prerequires_set
+    }
 
-# Helper function to normalize package names for directory lookup
-def normalize_package_name_for_find(dep_name):
+def resolve_dependencies_recursive(dependency_name, all_deps_set, processed_recipe_paths_set, provides_index):
     """
-    Normalizes a package name to a suitable directory name for recipe lookup.
-
-    This involves:
-    1. Stripping common prefixes (cmd:, lib:, devel:, etc.) used in dependency lists,
-       as these are not part of directory names.
-    2. Applying specific rules for known package name patterns that map to
-       different directory names (e.g., "python3.9" maps to "python" directory,
-       "openssl1.1" maps to "openssl" directory).
+    Recursively finds all dependencies for a given dependency name using the provides_index.
 
     Args:
-        dep_name (str): The dependency name, possibly with prefixes or version specifics
-                        (e.g., "cmd:python3.9", "openssl1.1", "lib:foo").
+        dependency_name (str): The cleaned, prefixed name of the dependency to resolve
+                               (e.g., "lib:openssl", "cmd:make"). This name should be
+                               as found in recipe files (after cleaning by _clean_recipe_item)
+                               or an initial package name provided by the user.
+        all_deps_set (set): A set to accumulate all unique dependency names found
+                            (will contain prefixed, cleaned names).
+        processed_recipe_paths_set (set): A set to store the file paths of recipes
+                                          that have already been parsed, to prevent
+                                          redundant work and cycles.
+        provides_index (dict): The pre-built dictionary mapping provided items
+                               to their recipe file paths.
+    """
+    # print(f"resolve_dependencies_recursive: Attempting to resolve '{dependency_name}'") # Verbose
+
+    recipe_path = get_recipe_path_for_dependency(dependency_name, provides_index)
+
+    if recipe_path is None:
+        # print(f"resolve_dependencies_recursive: No recipe path found in index for '{dependency_name}'. Leaf node or external.", file=sys.stderr) # Verbose
+        return
+
+    if recipe_path in processed_recipe_paths_set:
+        # print(f"resolve_dependencies_recursive: Recipe '{recipe_path}' already processed. Skipping for '{dependency_name}'.") # Verbose
+        return
+
+    processed_recipe_paths_set.add(recipe_path)
+    # print(f"resolve_dependencies_recursive: Processing recipe '{recipe_path}' for '{dependency_name}'.") # Verbose
+
+    parsed_info = parse_recipe(recipe_path)
+
+    direct_dependencies = parsed_info['build_requires'].union(parsed_info['build_prerequires'])
+
+    if not direct_dependencies:
+        # print(f"resolve_dependencies_recursive: No further build dependencies found in '{recipe_path}' for '{dependency_name}'.") # Verbose
+        pass
+
+    for new_dep_name in direct_dependencies:
+        all_deps_set.add(new_dep_name)
+        resolve_dependencies_recursive(new_dep_name, all_deps_set, processed_recipe_paths_set, provides_index)
+
+def _clean_recipe_item(raw_item_str):
+    """
+    Cleans a raw string from a PROVIDES, BUILD_REQUIRES, or BUILD_PREREQUIRES block.
+    - Strips surrounding quotes.
+    - Retains functional prefixes (cmd:, lib:, devel:, etc.).
+    - Removes version specifications and variables ($secondaryArchSuffix, etc.).
+    - Removes common architecture suffixes.
+    """
+    item_str = raw_item_str.strip().strip('"').strip("'")
+    if not item_str or item_str.startswith('#'):
+        return None
+
+    prefix = ""
+    prefix_match = re.match(r"^(cmd:|lib:|devel:|hpkg:|data:|source:|generic:|package:)", item_str)
+    if prefix_match:
+        prefix = prefix_match.group(1)
+        item_str = item_str[len(prefix):].strip()
+
+    item_str = item_str.split(' ')[0]
+    item_str = item_str.split('==')[0]
+    item_str = item_str.split('>=')[0]
+    item_str = item_str.split('<=')[0]
+    item_str = item_str.split('=')[0]
+    item_str = item_str.split('%')[0]
+
+    vars_to_remove = [
+        "$secondaryArchSuffix", "${secondaryArchSuffix}",
+        "$arch", "${arch}",
+        "$effectiveTargetArchitecture", "${effectiveTargetArchitecture}",
+        "$portVersion", "${portVersion}",
+        "$majorVersion", "${majorVersion}",
+        "$minorVersion", "${minorVersion}",
+        "$patchVersion", "${patchVersion}",
+    ]
+    for var in vars_to_remove:
+        item_str = item_str.replace(var, "")
+
+    arch_suffixes_regex = r"_((x86_gcc2)|(x86_64)|x86|gcc2|any|source)$"
+    item_str = re.sub(arch_suffixes_regex, "", item_str)
+    item_str = re.sub(r"_primaryArch$", "", item_str)
+    item_str = item_str.strip('_')
+
+    if not item_str:
+        return None
+
+    return prefix + item_str
+
+def build_provides_index(haikuports_root):
+    """
+    Builds an index mapping cleaned provided item names to their recipe file paths.
+
+    Scans all .recipe files in the specified haikuports_root, parses their
+    PROVIDES sections, cleans the item names (retaining prefixes, removing
+    versions/variables/arch-suffixes), and stores the mapping.
+
+    Args:
+        haikuports_root (str): The root path of the HaikuPorts checkout.
 
     Returns:
-        str: A normalized name intended to match a HaikuPorts directory name
-             (e.g., "python", "openssl", "foo").
-             Returns an empty string if the input is empty.
+        dict: A dictionary where keys are cleaned provided item names (str)
+              and values are the absolute paths to the recipe files (str)
+              that provide them.
     """
-    if not dep_name:
-        return ""
+    provides_index = {}
+    print(f"Building PROVIDES index from: {haikuports_root}...")
 
-    # Step 1: Strip common recipe prefixes (cmd:, lib:, devel:, etc.)
-    # These are used in BUILD_REQUIRES but not for directory naming.
-    base_name = re.sub(r"^(cmd:|lib:|devel:|hpkg:|data:|source:)", "", dep_name)
+    category_dirs = []
+    try:
+        for entry in os.listdir(haikuports_root):
+            if os.path.isdir(os.path.join(haikuports_root, entry)) and '-' in entry:
+                category_dirs.append(entry)
+    except OSError as e:
+        print(f"Error: Could not list category directories in '{haikuports_root}': {e}", file=sys.stderr)
+        return provides_index
 
-    # Step 2: Apply specific normalization rules for known package families
-    # These rules convert common versioned names or specific forms to a base directory name.
-    if base_name.startswith("python3") or base_name.startswith("python2"):
-        return "python"
-    if base_name.startswith("openssl3") or base_name.startswith("openssl1"): # e.g., openssl1.1, openssl3.0
-        return "openssl"
-    if base_name.startswith("zlib1"): # e.g. zlib1 -> zlib
-        return "zlib"
-    # For ICU, names like "icu69", "icu72" map to the "icu" directory.
-    if base_name.startswith("icu") and base_name[3:].isdigit() and not base_name == "icu":
-        return "icu"
-    # For Boost, names like "boost1.83" map to "boost" directory
-    if base_name.startswith("boost") and base_name[5:].isdigit():
-        return "boost"
-    # For OpenJDK, names like "openjdk8", "openjdk11" map to "openjdk" directory
-    if base_name.startswith("openjdk") and base_name[7:].isdigit():
-        return "openjdk"
-    # For GLib, names like "glib2.78" (if not already cleaned by parse_recipe) map to "glib"
-    if base_name.startswith("glib2"):
-        return "glib"
-    # Add more specific rules here if other common patterns are observed.
+    for category in category_dirs:
+        category_path = os.path.join(haikuports_root, category)
+        try:
+            for package_dir_name in os.listdir(category_path):
+                package_dir_path = os.path.join(category_path, package_dir_name)
+                if os.path.isdir(package_dir_path):
+                    try:
+                        recipe_files = [f for f in os.listdir(package_dir_path) if f.endswith(".recipe")]
+                        for recipe_filename in recipe_files:
+                            current_recipe_path = os.path.join(package_dir_path, recipe_filename)
+                            try:
+                                with open(current_recipe_path, 'r', encoding='utf-8', errors='ignore') as rf:
+                                    # Use parse_recipe to get the 'provides' part
+                                    parsed_content = parse_recipe(current_recipe_path) # Call the refactored parse_recipe
+                                    recipe_provides = parsed_content.get('provides', set())
 
-    # Default: return the (prefix-stripped) base_name.
-    # This assumes that after prefix stripping, the name is often the directory name.
-    # `parse_recipe` is responsible for removing versions like "-1.2.3" from the name part,
-    # so `base_name` here should be relatively clean of typical version suffixes.
-    return base_name
+                                    for cleaned_item in recipe_provides:
+                                        if cleaned_item in provides_index and provides_index[cleaned_item] != current_recipe_path:
+                                            print(f"WARNING: Duplicate provide for '{cleaned_item}': new '{current_recipe_path}' (from package '{package_dir_name}') potentially overrides old '{provides_index[cleaned_item]}'", file=sys.stderr)
+                                        provides_index[cleaned_item] = current_recipe_path
+                            except Exception as e_file:
+                                print(f"Error reading or processing recipe '{current_recipe_path}' for index: {e_file}", file=sys.stderr)
+                    except OSError as e_pkg:
+                        print(f"Error listing contents of package directory '{package_dir_path}': {e_pkg}", file=sys.stderr)
+        except OSError as e_cat:
+            print(f"Error listing contents of category directory '{category_path}': {e_cat}", file=sys.stderr)
 
+    print(f"Built PROVIDES index with {len(provides_index)} entries.")
+    return provides_index
 
-def resolve_dependencies_recursive(package_name_from_caller, all_found_dependencies, processed_lookup_tracker):
+def get_recipe_path_for_dependency(dependency_name, provides_index):
     """
-    Recursively finds all dependencies for a given package.
+    Retrieves the recipe file path for a given dependency name using the provides_index.
 
     Args:
-        package_name_from_caller (str): The name of the package as found in a
-                                        recipe or from initial user arguments.
-                                        May include prefixes (e.g., "cmd:make").
-        all_found_dependencies (set): A set to accumulate all unique cleaned
-                                      dependency names (with prefixes retained,
-                                      e.g., "cmd:make", "lib:zlib").
-        processed_lookup_tracker (set): A set to track normalized directory names
-                                        (lookup_name, e.g., "make", "zlib") that
-                                        have already been processed, to prevent
-                                        redundant work and cycles.
+        dependency_name (str): The cleaned, prefixed dependency name
+                               (e.g., "cmd:make", "lib:zlib", "devel:libfoo").
+        provides_index (dict): The pre-built dictionary mapping provided items
+                               to their recipe file paths.
+
+    Returns:
+        str: The path to the recipe file that provides the dependency,
+             or None if the dependency is not found in the index.
     """
-
-    # Normalize the package name for directory lookup and for tracking if this *recipe directory* has been processed.
-    lookup_name = normalize_package_name_for_find(package_name_from_caller)
-
-    # Base cases for recursion:
-    if not lookup_name or lookup_name == "haiku": # Skip invalid names or "haiku" itself (often a meta-package).
-        return
-    if lookup_name in processed_lookup_tracker: # Already processed this recipe's directory.
-        # print(f"resolve_dependencies_recursive: Already processed '{lookup_name}', skipping.") # Verbose
-        return
-
-    processed_lookup_tracker.add(lookup_name) # Mark as processed for this lookup_name.
-    # print(f"resolve_dependencies_recursive: Processing '{package_name_from_caller}' (lookup as '{lookup_name}')") # Verbose
-
-    recipe_path = find_recipe_file(lookup_name)
-
+    recipe_path = provides_index.get(dependency_name)
     if recipe_path:
-        direct_deps = parse_recipe(recipe_path) # Returns cleaned names with prefixes.
-
-        if not direct_deps and package_name_from_caller == lookup_name :
-            # Only print if it wasn't some alias that resolved to an empty recipe,
-            # and the user explicitly asked for this package.
-            print(f"Info: No dependencies parsed or error during parsing for '{lookup_name}' from '{recipe_path}'.", file=sys.stderr)
-
-        for dep_name_with_prefix in direct_deps:
-            # `dep_name_with_prefix` is already cleaned and prefixed by `parse_recipe`.
-
-            # Avoid self-dependency cycles if `dep_name_with_prefix` (after normalization for lookup)
-            # is the same as the current `lookup_name`. This prevents trivial loops.
-            if normalize_package_name_for_find(dep_name_with_prefix) == lookup_name:
-                continue
-
-            # Add the dependency (with prefix) to the global set of all found dependencies.
-            # This ensures uniqueness across the entire resolution process.
-            # Using a set handles uniqueness automatically.
-            all_found_dependencies.add(dep_name_with_prefix)
-            # if dep_name_with_prefix not in all_found_dependencies: # Verbose check
-            #    print(f"resolve_dependencies_recursive: Adding dependency for '{lookup_name}': '{dep_name_with_prefix}'") # Verbose
-
-            # Recursively resolve dependencies for this newly found dependency.
-            # The `dep_name_with_prefix` is passed as is; it will be normalized
-            # at the beginning of the next recursive call.
-            resolve_dependencies_recursive(dep_name_with_prefix, all_found_dependencies, processed_lookup_tracker)
+        return recipe_path
     else:
-        # Error message if a recipe file cannot be found for a `lookup_name`.
-        # This is important for identifying missing packages or normalization issues.
-        print(f"Warning: No recipe file found for lookup name '{lookup_name}' (derived from '{package_name_from_caller}'). Cannot resolve its dependencies.", file=sys.stderr)
-
+        # print(f"Info: Dependency '{dependency_name}' not found in PROVIDES index.", file=sys.stderr) # Can be noisy
+        return None
 
 def main():
     """
@@ -462,55 +360,73 @@ def main():
     """
     parser = argparse.ArgumentParser(
         description="Resolve build dependencies for HaikuPorts packages.",
-        formatter_class=argparse.RawDescriptionHelpFormatter # Preserves formatting of help text from module docstring
+        formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("package_names", nargs='+',
                         help="One or more package names to resolve dependencies for (e.g., 'openssl', 'cmd:make').")
 
     args = parser.parse_args()
 
-    initial_packages_as_specified = set(args.package_names)
-    all_found_dependencies = set() # Stores cleaned dependency names with prefixes, from parse_recipe.
-    processed_lookup_tracker = set() # Stores normalized lookup_names to avoid reprocessing recipe files.
+    print("Building package provides index. This might take a moment...")
+    provides_index = build_provides_index(HAIKUPORTS_ROOT)
 
-    print(f"Attempting to resolve dependencies for initial package(s): {', '.join(sorted(list(initial_packages_as_specified)))}")
+    if not provides_index:
+        print("Error: The provides index is empty. This could mean the script is not run from "
+              "the root of a HaikuPorts checkout, or no recipes were found/parsed correctly.", file=sys.stderr)
+        sys.exit(1)
 
-    for pkg_spec_name in initial_packages_as_specified:
-        # Start the recursive resolution for each initially specified package.
-        resolve_dependencies_recursive(pkg_spec_name, all_found_dependencies, processed_lookup_tracker)
+    initial_packages_from_args = set(args.package_names)
+    all_found_dependencies = set()
+    processed_recipe_paths = set()
 
-    # Filtering logic:
-    # `all_found_dependencies` contains all unique dependencies found, with prefixes.
-    # `initial_packages_as_specified` contains what the user typed.
-    # We need to exclude a dependency if its base name (without prefix) or its full prefixed name
-    # was in the initial set provided by the user.
+    print(f"Attempting to resolve dependencies for initial package(s): {', '.join(sorted(list(initial_packages_from_args)))}")
+
+    for user_pkg_name in initial_packages_from_args:
+        found_dep_name_in_index = None
+
+        # Order of preference for looking up the user-provided package name
+        prefixes_to_try = ["", "package:", "cmd:", "lib:", "devel:", "hpkg:", "generic:", "source:"]
+
+        # If user typed a prefixed name, try that first and primarily.
+        is_user_prefixed = ":" in user_pkg_name and user_pkg_name.split(":",1)[0]+":" in prefixes_to_try
+
+        if is_user_prefixed:
+            if user_pkg_name in provides_index:
+                found_dep_name_in_index = user_pkg_name
+        else: # User typed a base name (e.g., "openssl")
+            for prefix in prefixes_to_try:
+                potential_name = prefix + user_pkg_name
+                if potential_name in provides_index:
+                    found_dep_name_in_index = potential_name
+                    break
+
+        if found_dep_name_in_index:
+            # print(f"Found initial package '{user_pkg_name}' as '{found_dep_name_in_index}' in index.") # Verbose
+            all_found_dependencies.add(found_dep_name_in_index)
+            resolve_dependencies_recursive(found_dep_name_in_index, all_found_dependencies, processed_recipe_paths, provides_index)
+        else:
+            print(f"ERROR: Could not find a recipe in the index that provides '{user_pkg_name}' or its common prefixed variants. "
+                  "It might be a typo or not a directly providable package name.", file=sys.stderr)
+
     final_dependencies_to_install = set()
-    for dep_with_prefix in all_found_dependencies:
-        # Get the base name by stripping any known prefix
-        base_name_of_dep = re.sub(r"^(cmd:|lib:|devel:)", "", dep_with_prefix)
+    for dep_in_all_deps in all_found_dependencies:
+        base_name_of_dep = re.sub(r"^(package:|cmd:|lib:|devel:|hpkg:|generic:|source:)", "", dep_in_all_deps)
 
-        # A dependency should be excluded if:
-        # 1. Its base name matches one of the initially specified packages.
-        #    (e.g., user typed "gcc", and a resolved dependency is "cmd:gcc")
-        # 2. Its full prefixed name matches one of the initially specified packages.
-        #    (e.g., user typed "cmd:gcc", and a resolved dependency is "cmd:gcc")
-        if not (base_name_of_dep in initial_packages_as_specified or \
-                dep_with_prefix in initial_packages_as_specified):
-            final_dependencies_to_install.add(dep_with_prefix)
+        if dep_in_all_deps not in initial_packages_from_args and \
+           base_name_of_dep not in initial_packages_from_args:
+            final_dependencies_to_install.add(dep_in_all_deps)
 
     if final_dependencies_to_install:
         print("\nFinal list of prerequisite packages (excluding initially specified packages; prefixes retained):")
         for dep in sorted(list(final_dependencies_to_install)):
             print(dep)
     else:
-        # This block provides more context if the resulting list is empty.
-        if not all_found_dependencies and initial_packages_as_specified:
-             # This means no dependencies were found *at all* for the given initial packages.
-             print(f"\nNo dependencies found for the specified package(s): {', '.join(sorted(list(initial_packages_as_specified)))}. "
-                   "They might be meta-packages, have no listed build requirements, their recipes were not found, or there was a parsing error.")
-        elif not all_found_dependencies: # No initial packages specified and no dependencies found (e.g. error or empty run)
+        if not all_found_dependencies and initial_packages_from_args:
+             print(f"\nNo dependencies found for the specified package(s): {', '.join(sorted(list(initial_packages_from_args)))}. "
+                   "They might be meta-packages, have no listed build requirements, their recipes were not found in the index, or there was a parsing error.")
+        elif not all_found_dependencies:
              print(f"\nNo packages or dependencies processed or found.")
-        else: # Dependencies were found, but all of them were part of the initial set.
+        else:
              print("\nNo additional prerequisite packages found beyond those specified (or the specified packages are themselves the only dependencies, considering prefixes).")
 
 if __name__ == "__main__":

@@ -19,27 +19,12 @@ jobs:
       - name: Wait until the VM is ready
         run: container-init & timeout 600 vmshell exit 0
 
-      - name: Install build dependencies and compilation tools
+      - name: Install essential workflow tools
         run: |
-          # Instalar paquetes esenciales de compilación basados en la lista del usuario
-          vmshell pkgman install -y \
-            gcc binutils make cmake autoconf automake \
-            bison flex gawk gettext git gmp gperf grep \
-            libtool m4 nasm ncurses6 patch pkgconf \
-            python3.10 sed tar xz_utils zlib zlib_devel \
-            curl curl_devel openssl3 openssl3_devel \
-            glib2 glib2_devel gtk3 gtk3_devel cairo1.18 cairo1.18_devel \
-            fontconfig fontconfig_devel freetype freetype_devel \
-            harfbuzz harfbuzz_devel pango pango_devel \
-            expat libffi libffi_devel libxml2 libxml2_devel \
-            libxslt libpcre libpcre_devel libpng16 libpng16_devel \
-            libjpeg_turbo libjpeg_turbo_devel tiff tiff_devel \
-            libarchive libarchive_devel bzip2 bzip2_devel \
-            libyaml libyaml_devel jsoncpp meson ninja \
-            bash coreutils diffutils findutils gzip file \
-            which unzip zip bc less vim nano pip_python310 jq haikuporter \
-            json_glib_devel json_glib wayland_protocols gtk_doc \
-            zstd_devel zstd
+          vmshell "echo 'Installing essential workflow tools...' && \
+            pkgman install -y \
+              git jq haikuporter coreutils bash sed grep gawk findutils \
+              pkgconf curl xz_utils tar gzip unzip zip python3.10 make gcc binutils"
 
 #      - name: Install build dependencies and compilation tools
 #        run: |
@@ -61,6 +46,113 @@ jobs:
           vmshell "mkdir -p /boot/home/config/settings"
           vmshell "echo 'TREE_PATH="/boot/home/haikuports"' > /boot/home/config/settings/haikuports.conf"
           vmshell "echo 'PACKAGER=\"GitHub Actions Builder \<actions@github.com\>\"' >> /boot/home/config/settings/haikuports.conf"
+
+      - name: Generate dynamic dependency list
+        id: generate_deps
+        uses: anholt/actions-haiku/vmshell@master
+        env: # Pass the PACKAGES_JSON as an environment variable to the vmshell
+          PACKAGES_JSON: ${{ steps.detect-changes.outputs.packages }}
+        with:
+          script: |
+            echo "Starting dynamic dependency generation..."
+            # Initialize an empty list file
+            true > /tmp/all_dependencies.list
+            true > /tmp/base_pkgs_being_built.list
+            true > /tmp/final_prereqs.list
+
+            echo "PACKAGES_JSON content: $PACKAGES_JSON"
+
+            # Extract base package names from the JSON list of changed package directories
+            # Ensure jq processes the string correctly, it might need to be passed without outer single quotes in some contexts
+            echo "$PACKAGES_JSON" | jq -r '.[] | select(length > 0) | split("/") | .[-1]' > /tmp/base_pkgs_being_built.list
+
+            echo "Base packages being built:"
+            cat /tmp/base_pkgs_being_built.list
+
+            # Iterate through each package name (not directory) to get its dependencies
+            # The PACKAGES_JSON contains "category/pkgname", we need "pkgname"
+            echo "$PACKAGES_JSON" | jq -r '.[] | select(length > 0) | split("/") | .[-1]' | while IFS= read -r pkg_name; do
+              if [ -z "$pkg_name" ]; then
+                echo "Warning: Encountered an empty package name after jq processing."
+                continue
+              fi
+              echo "Listing dependencies for package: $pkg_name"
+              # Run haikuporter to list dependencies for the package name.
+              # Suppress stderr for this command for now, and ensure it doesn't halt the script on error.
+              # Using `set +e` and `set -e` to gracefully handle potential errors from haikuporter
+              set +e
+              haikuporter --list-dependencies "$pkg_name" >> /tmp/all_dependencies.list
+              hp_exit_code=$?
+              if [ $hp_exit_code -ne 0 ]; then
+                echo "Note: haikuporter --list-dependencies for $pkg_name exited with code $hp_exit_code (errors suppressed)."
+              fi
+              set -e
+            done
+
+            echo "All raw dependencies collected (/tmp/all_dependencies.list):"
+            cat /tmp/all_dependencies.list
+
+            # Create a unique list of dependencies
+            sort -u /tmp/all_dependencies.list > /tmp/unique_dependencies.list
+            echo "Unique dependencies (/tmp/unique_dependencies.list):"
+            cat /tmp/unique_dependencies.list
+
+            # Filter out the packages that are being built themselves and their common variants
+            echo "Filtering initial packages and their variants from the dependency list..."
+            while IFS= read -r dep; do
+              is_initial_or_variant=false
+              # Strip common prefixes for base name comparison
+              dep_base_name=$(echo "$dep" | sed -E 's/^(cmd:|lib:|devel:|package:|hpkg:|generic:|source:)//')
+
+              while IFS= read -r initial_pkg_name; do
+                # Check if dep (prefixed) or dep_base_name is the initial package or a direct variant
+                if [ "$dep" = "$initial_pkg_name" ] || \
+                   [ "$dep_base_name" = "$initial_pkg_name" ] || \
+                   [ "$dep_base_name" = "${initial_pkg_name}_devel" ] || \
+                   [ "$dep_base_name" = "${initial_pkg_name}_libs" ] || \
+                   [ "$dep_base_name" = "${initial_pkg_name}_tools" ] || \
+                   [ "$dep_base_name" = "${initial_pkg_name}_x86" ] || \
+                   [ "$dep_base_name" = "${initial_pkg_name}_any" ] || \
+                   [ "$dep_base_name" = "${initial_pkg_name}_source" ] || \
+                   [ "$dep_base_name" = "${initial_pkg_name}_source_kit" ] || \
+                   [ "$dep_base_name" = "${initial_pkg_name}_debuginfo" ]; then
+                  is_initial_or_variant=true
+                  break
+                fi
+              done < /tmp/base_pkgs_being_built.list
+
+              if [ "$is_initial_or_variant" = "false" ]; then
+                echo "$dep" >> /tmp/final_prereqs.list
+              fi
+            done < /tmp/unique_dependencies.list
+
+            echo "Final prerequisite list to be installed (/tmp/final_prereqs.list):"
+            cat /tmp/final_prereqs.list
+            echo "Dependency list generation complete."
+            # The next step ("Install build dependencies") should use /tmp/final_prereqs.list
+
+      - name: Install dynamic build dependencies
+        uses: anholt/actions-haiku/vmshell@master
+        with:
+          script: |
+            if [ -f /tmp/final_prereqs.list ] && [ -s /tmp/final_prereqs.list ]; then
+              echo 'Installing dynamically identified build prerequisites from /tmp/final_prereqs.list...'
+              DEPS_TO_INSTALL=$(cat /tmp/final_prereqs.list | tr '\n' ' ' | sed 's/ $//') # Convert newlines to spaces and remove trailing space
+              if [ -n "$DEPS_TO_INSTALL" ]; then
+                echo "Dynamic dependencies: $DEPS_TO_INSTALL"
+                set +e # Allow pkgman to fail on some packages if needed, though -y should handle most
+                pkgman install -y $DEPS_TO_INSTALL
+                pm_exit_code=$?
+                if [ $pm_exit_code -ne 0 ]; then
+                    echo "Warning: pkgman install for dynamic dependencies exited with code $pm_exit_code."
+                fi
+                set -e
+              else
+                echo 'Final prerequisite list was empty after processing.'
+              fi
+            else
+              echo 'No dynamic build prerequisites to install as /tmp/final_prereqs.list is missing or empty.'
+            fi
 
       - name: Detect modified packages compared to master
         id: detect-changes
