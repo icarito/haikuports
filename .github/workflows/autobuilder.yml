@@ -151,6 +151,31 @@ jobs:
             changed_recipes_list.json
           key: ${{ runner.os }}-haiku-deps-${{ needs.prepare-build.outputs.master_sha }}
 
+      - name: Debug cache restore results
+        run: |
+          echo "=== DEBUG: Cache restore results ==="
+          echo "Cache hit result: ${{ steps.restore-cache.outputs.cache-hit }}"
+          echo "Cache key used: ${{ runner.os }}-haiku-deps-${{ needs.prepare-build.outputs.master_sha }}"
+          echo "Master SHA from prepare-build: ${{ needs.prepare-build.outputs.master_sha }}"
+          echo "Files in current directory:"
+          ls -la
+          echo "Looking for changed_recipes_list.json:"
+          if [ -f "changed_recipes_list.json" ]; then
+            echo "✓ changed_recipes_list.json found"
+            echo "Content:"
+            cat changed_recipes_list.json
+          else
+            echo "✗ changed_recipes_list.json NOT found"
+          fi
+          echo "Looking for repository directory:"
+          if [ -d "repository" ]; then
+            echo "✓ repository directory found"
+            echo "Contents:"
+            ls -la repository/
+          else
+            echo "✗ repository directory NOT found"
+          fi
+
       - name: Start Haiku VM container
         env:
           VM_CPU: 4
@@ -194,13 +219,14 @@ jobs:
 
       - name: Setup HaikuPorter and place .DependencyInfo files in VM
         run: |
-          docker exec haiku-vm vmshell "mkdir -p /boot/home/config/settings"
-          docker exec haiku-vm vmshell "echo 'TREE_PATH=\"/boot/home/haikuports\"' > /boot/home/config/settings/haikuports.conf"
-          docker exec haiku-vm vmshell "echo 'PACKAGER=\"GitHub Actions Builder <actions@github.com>\"' >> /boot/home/config/settings/haikuports.conf"
-          docker exec haiku-vm vmshell "echo 'TARGET_ARCHITECTURE=\"x86_64\"' >> /boot/home/config/settings/haikuports.conf"
-
-      - name: Setup HaikuPorter and place .DependencyInfo files in VM
-        run: |
+          # Debug: Check what files we have on the runner
+          echo "=== DEBUG: Files on runner ==="
+          ls -la
+          echo "Looking for changed_recipes_list.json:"
+          ls -la changed_recipes_list.json || echo "changed_recipes_list.json not found"
+          echo "Looking for repository directory:"
+          ls -la repository/ || echo "repository directory not found"
+          
           docker exec haiku-vm vmshell "mkdir -p /boot/home/config/settings"
           docker exec haiku-vm vmshell "echo 'TREE_PATH=\"/boot/home/haikuports\"' > /boot/home/config/settings/haikuports.conf"
           docker exec haiku-vm vmshell "echo 'PACKAGER=\"GitHub Actions Builder <actions@github.com>\"' >> /boot/home/config/settings/haikuports.conf"
@@ -208,20 +234,39 @@ jobs:
 
           if [ -f "changed_recipes_list.json" ]; then
             echo "Cached files found on runner. Transferring to VM..."
-            # Transfer dependency info files
+            echo "Content of changed_recipes_list.json:"
+            cat changed_recipes_list.json
+            
+            # Transfer dependency info files using base64 encoding
             if [ -d "repository" ]; then
+              echo "Found repository directory, creating tar..."
               tar -czf dependency-infos.tar.gz repository/
-              docker cp dependency-infos.tar.gz haiku-vm:/dependency-infos.tar.gz
+              ls -la dependency-infos.tar.gz
+              echo "Transferring dependency info files with base64..."
+              base64 dependency-infos.tar.gz | docker exec -i haiku-vm vmshell "base64 -d > /dependency-infos.tar.gz"
+            else
+              echo "No repository directory found"
             fi
-            # Transfer recipes list
-            docker cp changed_recipes_list.json haiku-vm:/changed_recipes_list.json
+            
+            # Transfer recipes list using base64 encoding
+            echo "Transferring recipes list with base64..."
+            base64 changed_recipes_list.json | docker exec -i haiku-vm vmshell "base64 -d > /changed_recipes_list.json"
+            
+            # Verify files were transferred and extract
+            echo "=== DEBUG: Verifying files in VM ==="
+            docker exec haiku-vm vmshell "ls -la /"
+            docker exec haiku-vm vmshell "ls -la /changed_recipes_list.json || echo 'recipes list not found'"
+            docker exec haiku-vm vmshell "ls -la /dependency-infos.tar.gz || echo 'dependency tar not found'"
             
             docker exec haiku-vm vmshell "cd /boot/home/haikuports && \
               if [ -f /dependency-infos.tar.gz ]; then \
                 echo 'Extracting .DependencyInfo files...' && \
                 tar -xzf /dependency-infos.tar.gz && \
                 rm /dependency-infos.tar.gz && \
-                echo 'DependencyInfo files extracted to repository/' ; \
+                echo 'DependencyInfo files extracted to repository/' && \
+                ls -la repository/ || echo 'repository extraction failed' ; \
+              else \
+                echo 'No dependency-infos.tar.gz found in VM' ; \
               fi"
             echo "Files transferred and extracted in VM."
           else
@@ -231,10 +276,23 @@ jobs:
 
       - name: Build modified packages with haikuporter
         run: |
+          echo "=== DEBUG: Checking files in VM before build ==="
+          docker exec haiku-vm vmshell "ls -la /"
+          docker exec haiku-vm vmshell "ls -la /changed_recipes_list.json || echo 'recipes list not found in root'"
+          docker exec haiku-vm vmshell "cd /boot/home/haikuports && ls -la"
+          
           docker exec haiku-vm vmshell "cd /boot/home/haikuports && \
             echo 'Reading list of changed packages from /changed_recipes_list.json' && \
-            PACKAGES_JSON=\$(cat /changed_recipes_list.json) && \
-            echo \"Packages to build (JSON): \$PACKAGES_JSON\" && \
+            if [ -f /changed_recipes_list.json ]; then \
+              echo 'Found recipes list file' && \
+              PACKAGES_JSON=\$(cat /changed_recipes_list.json) && \
+              echo \"Packages to build (JSON): \$PACKAGES_JSON\" ; \
+            else \
+              echo 'ERROR: /changed_recipes_list.json not found!' && \
+              echo 'Files in root:' && \
+              ls -la / && \
+              PACKAGES_JSON='[]' ; \
+            fi && \
             \
             mkdir -p packages && \
             mkdir -p repository && \
