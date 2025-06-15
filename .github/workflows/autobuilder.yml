@@ -132,7 +132,6 @@ jobs:
           haikuporter -q --config="${{ github.workspace }}/haikuports.conf" --licenses="${{ github.workspace }}/$LICENSES_DIR_NAME" --repository-update
           
           echo "Repository update completed. Generated .DependencyInfo files:"
-          find repository -name "*.DependencyInfo" | head -n 10
         shell: bash
 
       - name: Package changed ports
@@ -147,23 +146,7 @@ jobs:
           mkdir -p changed_ports_temp
           
           for recipe in $CHANGED_RECIPES; do
-            echo "Looking for directories containing recipe: $recipe"
-            # Find all directories that contain this recipe
-            find . -name "*.recipe" -path "*/$recipe/*" -printf '%h\n' | while read dir; do
-              if [ -d "$dir" ]; then
-                # Extract the category and port name from the path
-                category=$(echo "$dir" | cut -d'/' -f2)
-                port=$(echo "$dir" | cut -d'/' -f3)
-                echo "Found port directory: $category/$port"
-                
-                # Create category directory in temp if it doesn't exist
-                mkdir -p "changed_ports_temp/$category"
-                
-                # Copy the entire port directory
-                cp -r "$dir" "changed_ports_temp/$category/"
-                echo "Copied $dir to changed_ports_temp/$category/$port"
-              fi
-            done
+            cp -ar */"$recipe" changed_ports_temp/
           done
           
           # Create the tar.gz file
