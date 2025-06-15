@@ -13,7 +13,8 @@ jobs:
     outputs:
       changed_recipes_space_separated: ${{ steps.detect-changes.outputs.changed_recipes_space_separated }}
       has_changed_recipes: ${{ steps.detect-changes.outputs.has_changed_recipes }}
-      master_sha: ${{ steps.get-master-ref.outputs.master_sha }}
+      current_sha: ${{ steps.get-current-ref.outputs.current_sha }}
+      master_sha: ${{ steps.get-current-ref.outputs.master_sha }}
     steps:
       - name: Checkout HaikuPorts repository
         uses: actions/checkout@v4
@@ -95,21 +96,15 @@ jobs:
           fi
         shell: bash
 
-      - name: Update Repository and Stage Dependency Infos
-        id: generate-deps
-        if: steps.detect-changes.outputs.has_changed_recipes == 'true'
+      - name: Get current commit for cache key
+        id: get-current-ref
         run: |
-          echo "Updating HaikuPorter repository to generate/update all .DependencyInfo files..."
-          # Dynamically find the unzipped license directory name relative to workspace
-          LICENSES_DIR_NAME=$(ls -d ${{ github.workspace }}/haiku-licenses-*/ | head -n 1 | xargs basename)
-          echo "Using licenses directory: $LICENSES_DIR_NAME at ${{ github.workspace }}/$LICENSES_DIR_NAME"
-
-          haikuporter -q --config="${{ github.workspace }}/haikuports.conf"                     --licenses="${{ github.workspace }}/$LICENSES_DIR_NAME" --repository-update
-        shell: bash
-        
-      - name: Get master branch commit for cache key
-        id: get-master-ref
-        run: |
+          # Use current commit SHA for cache key to ensure fresh DependencyInfo generation
+          CURRENT_SHA=${{ github.sha }}
+          echo "current_sha=$CURRENT_SHA" >> $GITHUB_OUTPUT
+          echo "Using current commit SHA for cache key: $CURRENT_SHA"
+          
+          # Also get master SHA for fallback cache restore if needed
           if git rev-parse --verify origin/main >/dev/null 2>&1; then
             MASTER_SHA=$(git rev-parse origin/main)
           elif git rev-parse --verify origin/master >/dev/null 2>&1; then
@@ -118,7 +113,26 @@ jobs:
             MASTER_SHA=${{ github.sha }}
           fi
           echo "master_sha=$MASTER_SHA" >> $GITHUB_OUTPUT
-          echo "Using master SHA for cache key: $MASTER_SHA"
+          echo "Master SHA for fallback: $MASTER_SHA"
+        shell: bash
+
+      - name: Update Repository and Stage Dependency Infos
+        id: generate-deps
+        if: steps.detect-changes.outputs.has_changed_recipes == 'true'
+        run: |
+          echo "Updating HaikuPorter repository to generate/update all .DependencyInfo files..."
+          echo "Working on commit: ${{ steps.get-current-ref.outputs.current_sha }}"
+          git log --oneline -n 3
+          
+          # Dynamically find the unzipped license directory name relative to workspace
+          LICENSES_DIR_NAME=$(ls -d ${{ github.workspace }}/haiku-licenses-*/ | head -n 1 | xargs basename)
+          echo "Using licenses directory: $LICENSES_DIR_NAME at ${{ github.workspace }}/$LICENSES_DIR_NAME"
+
+          echo "Generating .DependencyInfo files for current commit state..."
+          haikuporter -q --config="${{ github.workspace }}/haikuports.conf" --licenses="${{ github.workspace }}/$LICENSES_DIR_NAME" --repository-update
+          
+          echo "Repository update completed. Generated .DependencyInfo files:"
+          find repository -name "*.DependencyInfo" | head -n 10
         shell: bash
 
       - name: Package changed ports
@@ -173,7 +187,10 @@ jobs:
           path: |
             repository/*
             changed_ports.tar.gz
-          key: ${{ runner.os }}-haiku-deps-${{ steps.get-master-ref.outputs.master_sha }}
+          key: ${{ runner.os }}-haiku-deps-${{ steps.get-current-ref.outputs.current_sha }}
+          restore-keys: |
+            ${{ runner.os }}-haiku-deps-${{ steps.get-current-ref.outputs.master_sha }}
+            ${{ runner.os }}-haiku-deps-
 
   build-haikuports: 
     runs-on: ubuntu-latest
@@ -188,13 +205,17 @@ jobs:
           path: |
             repository/*
             changed_ports.tar.gz
-          key: ${{ runner.os }}-haiku-deps-${{ needs.prepare-build.outputs.master_sha }}
+          key: ${{ runner.os }}-haiku-deps-${{ needs.prepare-build.outputs.current_sha }}
+          restore-keys: |
+            ${{ runner.os }}-haiku-deps-${{ needs.prepare-build.outputs.master_sha }}
+            ${{ runner.os }}-haiku-deps-
 
       - name: Debug cache restore results
         run: |
           echo "=== DEBUG: Cache restore results ==="
           echo "Cache hit result: ${{ steps.restore-cache.outputs.cache-hit }}"
-          echo "Cache key used: ${{ runner.os }}-haiku-deps-${{ needs.prepare-build.outputs.master_sha }}"
+          echo "Cache key used: ${{ runner.os }}-haiku-deps-${{ needs.prepare-build.outputs.current_sha }}"
+          echo "Current SHA from prepare-build: ${{ needs.prepare-build.outputs.current_sha }}"
           echo "Master SHA from prepare-build: ${{ needs.prepare-build.outputs.master_sha }}"
           echo "Files in current directory:"
           ls -la
