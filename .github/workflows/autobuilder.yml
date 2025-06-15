@@ -102,9 +102,7 @@ jobs:
           LICENSES_DIR_NAME=$(ls -d ${{ github.workspace }}/haiku-licenses-*/ | head -n 1 | xargs basename)
           echo "Using licenses directory: $LICENSES_DIR_NAME at ${{ github.workspace }}/$LICENSES_DIR_NAME"
 
-          haikuporter -q --config="${{ github.workspace }}/haikuports.conf"                     --licenses="${{ github.workspace }}/$LICENSES_DIR_NAME"                     --repository-update
-          ls -R repository | wc -l
-          echo "Repository updated. .DependencyInfo files generated for changed recipes."
+          haikuporter -q --config="${{ github.workspace }}/haikuports.conf"                     --licenses="${{ github.workspace }}/$LICENSES_DIR_NAME" --repository-update
         shell: bash
 
       - name: Save changed recipes list to a file for caching
@@ -114,6 +112,20 @@ jobs:
           echo "Saved changed recipes JSON to changed_recipes_list.json for caching."
         shell: bash
         
+      - name: Get master branch commit for cache key
+        id: get-master-ref
+        run: |
+          if git rev-parse --verify origin/main >/dev/null 2>&1; then
+            MASTER_SHA=$(git rev-parse origin/main)
+          elif git rev-parse --verify origin/master >/dev/null 2>&1; then
+            MASTER_SHA=$(git rev-parse origin/master)
+          else
+            MASTER_SHA=${{ github.sha }}
+          fi
+          echo "master_sha=$MASTER_SHA" >> $GITHUB_OUTPUT
+          echo "Using master SHA for cache key: $MASTER_SHA"
+        shell: bash
+
       - name: Cache .DependencyInfo files and changed recipes list
         id: cache-deps
         uses: actions/cache@v4
@@ -121,4 +133,4 @@ jobs:
           path: |
             repository/*.DependencyInfo
             changed_recipes_list.json
-          key: ${{ runner.os }}-haiku-deps-${{ github.sha }}
+          key: ${{ runner.os }}-haiku-deps-${{ steps.get-master-ref.outputs.master_sha }}
