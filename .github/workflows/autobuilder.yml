@@ -10,6 +10,9 @@ on:
 jobs:
   build-haikuports:
     runs-on: ubuntu-latest
+    env:
+      VM_CPU: 4
+      VM_RAM: 15G
     container: docker.io/hectorm/qemu-haiku:latest
 
     steps:
@@ -34,7 +37,17 @@ jobs:
             libarchive libarchive_devel bzip2 bzip2_devel \
             libyaml libyaml_devel jsoncpp meson ninja \
             bash coreutils diffutils findutils gzip file \
-            which unzip zip bc less vim nano pip_python310 jq
+            which unzip zip bc less vim nano pip_python310 jq haikuporter \
+            json_glib_devel json_glib wayland_protocols gtk_doc \
+            zstd_devel zstd
+
+#      - name: Install build dependencies and compilation tools
+#        run: |
+#          # Instalar paquetes esenciales de compilación basados en la lista del usuario
+#          vmshell pkgman install -y jq haikuporter
+
+
+#          vmshell git clone https://github.com/haikuports/haikuporter.git /boot/home/haikuporter
 
       - name: Checkout HaikuPorts repository in VM
         run: |
@@ -45,7 +58,6 @@ jobs:
 
       - name: Setup HaikuPorter
         run: |
-          vmshell git clone https://github.com/haikuports/haikuporter.git /boot/home/haikuporter
           vmshell "mkdir -p /boot/home/config/settings"
           vmshell "echo 'TREE_PATH="/boot/home/haikuports"' > /boot/home/config/settings/haikuports.conf"
           vmshell "echo 'PACKAGER=\"GitHub Actions Builder \<actions@github.com\>\"' >> /boot/home/config/settings/haikuports.conf"
@@ -53,18 +65,41 @@ jobs:
       - name: Detect modified packages compared to master
         id: detect-changes
         run: |
+          # Cambiar al directorio de haikuports dentro del VM
           vmshell "cd ~/haikuports && \
-            git fetch origin master && \
-            CHANGED_DIRS=\$(git diff --name-only --diff-filter=d master * | grep / | sort -u | cut -d '/' -f 2 | sort | uniq) && \
-            if [ -z \"$CHANGED_DIRS\" ]; then
+            # Configurar git para evitar warnings
+            git config --global user.email 'actions@github.com' && \
+            git config --global user.name 'GitHub Actions' && \
+
+            # Obtener la lista de directorios modificados respecto a master
+            if git rev-parse --verify origin/master >/dev/null 2>&1; then
+              BASE_REF='origin/master'
+            elif git rev-parse --verify master >/dev/null 2>&1; then
+              BASE_REF='master'
+            else
+              echo 'No master branch found, building all packages'
+              BASE_REF='HEAD~1'
+            fi
+
+            echo \"Comparing against: \$BASE_REF\"
+
+            # Encontrar directorios de paquetes modificados
+            CHANGED_DIRS=\$(git diff --name-only \$BASE_REF...HEAD * | \
+              cut -d'/' -f2 | sort -u)
+            echo $CHANGED_DIRS
+
+            if [ -z \"\$CHANGED_DIRS\" ]; then
               echo 'No packages to build'
-              echo 'packages=[]' > /tmp/packages_to_build.txt
+              echo 'packages=' >> /tmp/packages_to_build.txt
             else
               echo 'Packages to build:'
-              echo \"$CHANGED_DIRS\" | tee /tmp/packages_to_build.txt
-              PACKAGES_JSON=\$(echo \"$CHANGED_DIRS\" | jq -R -s -c 'split("\n") | map(select(length > 0))')
-              echo \"packages=$PACKAGES_JSON\" >> /tmp/packages_to_build.txt
+              echo \"\$CHANGED_DIRS\" | tee /tmp/packages_to_build.txt
+              # Convertir a formato para GitHub Actions
+              PACKAGES_JSON=\$(echo \"\$CHANGED_DIRS\" | jq -R -s -c 'split(\"\n\") | map(select(length > 0))')
+              echo \"packages=\$PACKAGES_JSON\" >> /tmp/packages_to_build.txt
             fi"
+
+          # Leer el resultado del VM
           PACKAGES=$(vmshell cat /tmp/packages_to_build.txt | grep '^packages=' | cut -d'=' -f2-)
           echo "packages=$PACKAGES" >> $GITHUB_OUTPUT
 
@@ -75,9 +110,6 @@ jobs:
           echo "Building packages: $PACKAGES"
 
           vmshell "cd ~/haikuports && \
-            # Hacer ejecutable haikuporter
-            chmod +x ~/haikuporter/haikuporter && \
-
             # Crear directorios necesarios
             mkdir -p packages && \
             mkdir -p repository && \
@@ -91,7 +123,7 @@ jobs:
               echo \"Building package: \$pkg_dir\"
 
               # Intentar construir el paquete con dependencias faltantes
-              if ~/haikuporter/haikuporter \$pkg_name --missing-dependencies --no-source-packages; then
+              if haikuporter \$pkg_name -j4; then
                 echo \"✓ Successfully built \$pkg_dir\"
                 return 0
               else
