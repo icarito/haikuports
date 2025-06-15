@@ -132,7 +132,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            repository/*.DependencyInfo
+            repository/*
             changed_recipes_list.json
           key: ${{ runner.os }}-haiku-deps-${{ steps.get-master-ref.outputs.master_sha }}
 
@@ -147,7 +147,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: |
-            repository/*.DependencyInfo
+            repository/*
             changed_recipes_list.json
           key: ${{ runner.os }}-haiku-deps-${{ needs.prepare-build.outputs.master_sha }}
 
@@ -181,29 +181,16 @@ jobs:
           VM_CPU: 4
           VM_RAM: 15G
         run: |
-          # Create a shared directory for file transfer
-          mkdir -p /tmp/haiku-shared
-          
-          # Copy cache files to shared directory if they exist
-          if [ -f "changed_recipes_list.json" ]; then
-            cp changed_recipes_list.json /tmp/haiku-shared/
-            echo "Copied changed_recipes_list.json to shared directory"
-          fi
-          
-          if [ -d "repository" ]; then
-            tar -czf /tmp/haiku-shared/dependency-infos.tar.gz repository/
-            echo "Created dependency-infos.tar.gz in shared directory"
-            ls -la /tmp/haiku-shared/
-          fi
-          
+          echo "Starting Haiku VM container..."
           docker run -d --name haiku-vm \
-            -v "/tmp/haiku-shared:/shared" \
             -e VM_CPU="$VM_CPU" \
             -e VM_RAM="$VM_RAM" \
             docker.io/hectorm/qemu-haiku:latest
           
+          echo "Waiting for container to be ready..."
           # Wait for container to be ready
           timeout 600 docker exec haiku-vm sh -c 'container-init & timeout 600 vmshell exit 0'
+          echo "Container should be ready."
 
       - name: Install build dependencies and compilation tools in VM
         run: |
@@ -243,36 +230,44 @@ jobs:
           docker exec haiku-vm vmshell "echo 'PACKAGER=\"GitHub Actions Builder <actions@github.com>\"' >> /boot/home/config/settings/haikuports.conf"
           docker exec haiku-vm vmshell "echo 'TARGET_ARCHITECTURE=\"x86_64\"' >> /boot/home/config/settings/haikuports.conf"
 
-          # Check what's in the shared volume
-          echo "=== DEBUG: Files in shared volume ==="
-          docker exec haiku-vm vmshell "ls -la /shared/ || echo 'No shared directory found'"
-          
-          # Copy files from shared volume and extract
-          docker exec haiku-vm vmshell "cd /boot/home/haikuports && \
-            if [ -f /shared/dependency-infos.tar.gz ]; then \
-              echo 'Found dependency-infos.tar.gz in shared volume' && \
-              tar -xzf /shared/dependency-infos.tar.gz && \
-              echo 'DependencyInfo files extracted to repository/' && \
-              ls -la repository/ | head -10 ; \
-            else \
-              echo 'No dependency-infos.tar.gz found in shared volume' ; \
-            fi && \
-            if [ -f /shared/changed_recipes_list.json ]; then \
-              echo 'Found changed_recipes_list.json in shared volume' && \
-              cp /shared/changed_recipes_list.json /boot/home/haikuports/changed_recipes_list.json && \
-              echo 'Copied recipes list to VM work directory' ; \
-            else \
-              echo 'No changed_recipes_list.json found in shared volume' && \
-              echo '[]' > /boot/home/haikuports/changed_recipes_list.json ; \
-            fi"
+          echo "--- Transferring cached files to VM ---"
+          if [ -f "changed_recipes_list.json" ]; then
+            echo "Transferring changed_recipes_list.json to VM..."
+            cat changed_recipes_list.json | docker exec -i haiku-vm vmshell "mkdir -p /boot/home/haikuports && cat > /boot/home/haikuports/changed_recipes_list.json"
+            echo "Transferred changed_recipes_list.json."
+            docker exec -i haiku-vm vmshell "echo 'Content of changed_recipes_list.json in VM:'; cat /boot/home/haikuports/changed_recipes_list.json"
+          else
+            echo "changed_recipes_list.json not found on runner. Creating empty list in VM."
+            docker exec haiku-vm vmshell "mkdir -p /boot/home/haikuports && echo '[]' > /boot/home/haikuports/changed_recipes_list.json"
+          fi
+
+          if [ -d "repository" ]; then
+            echo "Creating dependency-infos.tar.gz on runner..."
+            tar -czf dependency-infos.tar.gz repository
+            echo "Transferring dependency-infos.tar.gz to VM..."
+            cat dependency-infos.tar.gz | docker exec -i haiku-vm vmshell "mkdir -p /boot/home/haikuports && cat > /boot/home/haikuports/dependency-infos.tar.gz"
+            rm dependency-infos.tar.gz # Clean up on runner
+            
+            echo "Extracting dependency-infos.tar.gz in VM..."
+            docker exec haiku-vm vmshell "cd /boot/home/haikuports && \
+              if [ -f dependency-infos.tar.gz ]; then \
+                tar -xzf dependency-infos.tar.gz && \
+                rm dependency-infos.tar.gz && \
+                echo 'DependencyInfo files extracted and archive removed in VM.' && \
+                echo 'Listing /boot/home/haikuports/repository/ in VM (head):' && \
+                ls -la repository/ | head -10 ; \
+              else \
+                echo 'ERROR: dependency-infos.tar.gz not found in /boot/home/haikuports/ in VM after transfer.' ; \
+              fi"
+          else
+            echo "repository/ directory not found on runner. No .DependencyInfo files to transfer."
+            docker exec haiku-vm vmshell "mkdir -p /boot/home/haikuports/repository" # Ensure dir exists
+          fi
+          echo "--- Finished transferring cached files ---"
 
       - name: Build modified packages with haikuporter
         run: |
           echo "=== DEBUG: Checking files in VM before build ==="
-          docker exec haiku-vm vmshell "ls -la /boot/home/haikuports/"
-          docker exec haiku-vm vmshell "ls -la /boot/home/haikuports/changed_recipes_list.json || echo 'recipes list not found in work directory'"
-          docker exec haiku-vm vmshell "cd /boot/home/haikuports && ls -la"
-          
           docker exec haiku-vm vmshell "cd /boot/home/haikuports && \
             echo 'Reading list of changed packages from /boot/home/haikuports/changed_recipes_list.json' && \
             if [ -f /boot/home/haikuports/changed_recipes_list.json ]; then \
