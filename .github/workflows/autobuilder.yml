@@ -13,6 +13,7 @@ jobs:
     outputs:
       changed_recipes_json: ${{ steps.detect-changes.outputs.changed_recipes_json }}
       has_changed_recipes: ${{ steps.detect-changes.outputs.has_changed_recipes }}
+      master_sha: ${{ steps.get-master-ref.outputs.master_sha }}
     steps:
       - name: Checkout HaikuPorts repository
         uses: actions/checkout@v4
@@ -134,3 +135,165 @@ jobs:
             repository/*.DependencyInfo
             changed_recipes_list.json
           key: ${{ runner.os }}-haiku-deps-${{ steps.get-master-ref.outputs.master_sha }}
+
+  build-haikuports: 
+    runs-on: ubuntu-latest
+    needs: prepare-build 
+    if: needs.prepare-build.outputs.has_changed_recipes == 'true'
+    env:
+      VM_CPU: 4
+      VM_RAM: 15G
+    container: docker.io/hectorm/qemu-haiku:latest
+
+    steps:
+      - name: Wait until the VM is ready
+        run: container-init & timeout 600 vmshell exit 0
+
+      - name: Restore cached DependencyInfo files and recipes list
+        id: restore-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            repository/*.DependencyInfo
+            changed_recipes_list.json
+          key: ${{ runner.os }}-haiku-deps-${{ needs.prepare-build.outputs.master_sha }}
+
+      - name: Install build dependencies and compilation tools in VM
+        run: |
+          vmshell pkgman install -y \
+            gcc binutils make cmake autoconf automake \
+            bison flex gawk gettext git gmp gperf grep \
+            libtool m4 nasm ncurses6 patch pkgconf \
+            python3.10 sed tar xz_utils zlib zlib_devel \
+            curl curl_devel openssl3 openssl3_devel \
+            glib2 glib2_devel gtk3 gtk3_devel cairo1.18 cairo1.18_devel \
+            fontconfig fontconfig_devel freetype freetype_devel \
+            harfbuzz harfbuzz_devel pango pango_devel \
+            expat libffi libffi_devel libxml2 libxml2_devel \
+            libxslt libpcre libpcre_devel libpng16 libpng16_devel \
+            libjpeg_turbo libjpeg_turbo_devel tiff tiff_devel \
+            libarchive libarchive_devel bzip2 bzip2_devel \
+            libyaml libyaml_devel jsoncpp meson ninja \
+            bash coreutils diffutils findutils gzip file \
+            which unzip zip bc less vim nano pip_python310 jq haikuporter \
+            json_glib_devel json_glib wayland_protocols gtk_doc \
+            zstd_devel zstd
+
+      - name: Checkout HaikuPorts repository in VM
+        run: |
+          vmshell "mkdir -p /boot/home/haikuports && \
+            git clone https://github.com/${GITHUB_REPOSITORY}.git /boot/home/haikuports && \
+            cd /boot/home/haikuports && \
+            git checkout ${GITHUB_SHA}"
+
+      - name: Setup HaikuPorter and place .DependencyInfo files in VM
+        run: |
+          vmshell "mkdir -p /boot/home/config/settings"
+          vmshell "echo 'TREE_PATH=\"/boot/home/haikuports\"' > /boot/home/config/settings/haikuports.conf"
+          vmshell "echo 'PACKAGER=\"GitHub Actions Builder <actions@github.com>\"' >> /boot/home/config/settings/haikuports.conf"
+          vmshell "echo 'TARGET_ARCHITECTURE=\"x86_64\"' >> /boot/home/config/settings/haikuports.conf"
+
+          if [ -f "changed_recipes_list.json" ]; then
+            echo "Cached files found on runner. Transferring to VM..."
+            # Transfer dependency info files
+            if [ -d "repository" ]; then
+              tar -czf dependency-infos.tar.gz repository/
+              cat dependency-infos.tar.gz | vmshell "cat > /dependency-infos.tar.gz"
+            fi
+            # Transfer recipes list
+            cat changed_recipes_list.json | vmshell "cat > /changed_recipes_list.json"
+            
+            vmshell "cd /boot/home/haikuports && \
+              if [ -f /dependency-infos.tar.gz ]; then \
+                echo 'Extracting .DependencyInfo files...' && \
+                tar -xzf /dependency-infos.tar.gz && \
+                rm /dependency-infos.tar.gz && \
+                echo 'DependencyInfo files extracted to repository/' ; \
+              fi"
+            echo "Files transferred and extracted in VM."
+          else
+            echo "No cached files found on runner."
+            vmshell "echo '[]' > /changed_recipes_list.json"
+          fi
+
+      - name: Build modified packages with haikuporter
+        run: |
+          vmshell "cd /boot/home/haikuports && \
+            echo 'Reading list of changed packages from /changed_recipes_list.json' && \
+            PACKAGES_JSON=\$(cat /changed_recipes_list.json) && \
+            echo \"Packages to build (JSON): \$PACKAGES_JSON\" && \
+            \
+            mkdir -p packages && \
+            mkdir -p repository && \
+            \
+            # Convert JSON array to space-separated arguments
+            RECIPE_ARGS=\$(echo \"\$PACKAGES_JSON\" | jq -r '.[]' | tr '\n' ' ') && \
+            \
+            if [ -z \"\$RECIPE_ARGS\" ] || [ \"\$RECIPE_ARGS\" = \" \" ]; then \
+              echo 'No packages specified to build.' ; \
+            else \
+              echo \"Building packages: \$RECIPE_ARGS\" ; \
+              if haikuporter \$RECIPE_ARGS -S -j4; then \
+                echo \"✓ HaikuPorter build completed successfully.\" ; \
+              else \
+                BUILD_FAILURE_CODE=\$? ; \
+                echo \"✗ HaikuPorter build failed with exit code \$BUILD_FAILURE_CODE.\" ; \
+                exit \$BUILD_FAILURE_CODE ; \
+              fi ; \
+            fi ; \
+            \
+            echo \"Build summary:\" ; \
+            NUM_PACKAGES=\$(echo \"\$PACKAGES_JSON\" | jq -r '. | length') ; \
+            echo \"- Packages attempted: \$NUM_PACKAGES\" ; \
+            if [ -d packages ] && ls packages/*.hpkg >/dev/null 2>&1; then \
+              echo \"- Built packages: \$(ls packages/*.hpkg | wc -l)\" ; \
+              echo \"- Package files: \$(ls packages/*.hpkg | xargs basename -a | tr '\n' ' ')\" ; \
+            else \
+              echo \"- Built packages: 0\" ; \
+            fi"
+
+      - name: Collect build artifacts
+        if: always()
+        run: |
+          mkdir -p build-artifacts
+          vmshell "cd /boot/home/haikuports && \
+            if [ -d packages ] && ls packages/*.hpkg >/dev/null 2>&1; then
+              echo 'Collecting built packages:'
+              ls -la packages/*.hpkg
+              tar -czf /built-packages.tar.gz packages/*.hpkg
+            else
+              echo 'No packages were built'
+              tar -czf /built-packages.tar.gz --files-from /dev/null
+            fi
+            if [ -d work ]; then
+              find work -name '*.log' -type f | head -n 20 | tar -czf /build-logs.tar.gz -T - 2>/dev/null || \
+              tar -czf /build-logs.tar.gz --files-from /dev/null
+            else
+              tar -czf /build-logs.tar.gz --files-from /dev/null
+            fi"
+          vmshell cat /built-packages.tar.gz > build-artifacts/built-packages.tar.gz || true
+          vmshell cat /build-logs.tar.gz > build-artifacts/build-logs.tar.gz || true
+
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: haikuports-build-${{ github.run_number }}
+          path: build-artifacts/
+          retention-days: 30
+
+      - name: Display build summary
+        if: always()
+        run: |
+          echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Workflow:** ${{ github.workflow }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Run Number:** ${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Trigger:** ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          PACKAGES_JSON_STRING='${{ needs.prepare-build.outputs.changed_recipes_json }}'
+          DISPLAY_PACKAGES=$(echo "$PACKAGES_JSON_STRING" | jq -r '. | join(", ")' 2>/dev/null || echo "$PACKAGES_JSON_STRING")
+          echo "**Packages processed:** $DISPLAY_PACKAGES" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Artifacts:** Check the uploaded build artifacts for built packages and logs." >> $GITHUB_STEP_SUMMARY
