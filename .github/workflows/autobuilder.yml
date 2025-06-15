@@ -187,6 +187,7 @@ jobs:
             glib2 glib2_devel gtk3 gtk3_devel cairo1.18 cairo1.18_devel \
             fontconfig fontconfig_devel freetype freetype_devel \
             harfbuzz harfbuzz_devel pango pango_devel \
+            gobject_introspection gobject_introspection_devel \
             expat libffi libffi_devel libxml2 libxml2_devel \
             libxslt libpcre libpcre_devel libpng16 libpng16_devel \
             libjpeg_turbo libjpeg_turbo_devel tiff tiff_devel \
@@ -195,7 +196,7 @@ jobs:
             bash coreutils diffutils findutils gzip file \
             which unzip zip bc less vim nano pip_python310 jq haikuporter \
             json_glib_devel json_glib wayland_protocols gtk_doc \
-            zstd_devel zstd
+            zstd_devel zstd xz_utils xz_utils_devel
 
       - name: Checkout HaikuPorts repository in VM
         run: |
