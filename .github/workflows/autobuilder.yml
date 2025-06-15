@@ -10,6 +10,10 @@ on:
 jobs:
   prepare-build:
     runs-on: ubuntu-latest
+    env:
+      VM_CPU: 4
+      VM_RAM: 15G
+    container: docker.io/hectorm/qemu-haiku:latest
     outputs:
       changed_recipes_json: ${{ steps.detect-changes.outputs.changed_recipes_json }}
       has_changed_recipes: ${{ steps.detect-changes.outputs.has_changed_recipes }}
@@ -20,26 +24,24 @@ jobs:
         with:
           fetch-depth: 0 
 
-      - name: Set up Python for HaikuPorter
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.9'
+      - name: Wait until the VM is ready
+        run: container-init &
 
       - name: Install HaikuPorter
         run: |
+          apt update && apt install -y git wget unzip jq python3-pip
           git clone https://github.com/haikuports/haikuporter.git ~/haikuporter
-          sudo ln -s "$HOME/haikuporter/haikuporter" /usr/local/bin/haikuporter
-          echo "HaikuPorter installed. Version:"
+          python3 -m pip install --upgrade ~/haikuporter
+          ln -s "$HOME/haikuporter/haikuporter" /usr/local/bin/haikuporter
           haikuporter --version
         shell: bash
 
       - name: Set up HaikuPorter configuration
         run: |
-          echo "TREE_PATH=\"${{ github.workspace }}\"" > "${{ github.workspace }}/haikuports.conf"
-          echo "PACKAGER=\"CI Builder <ci@example.com>\"" >> "${{ github.workspace }}/haikuports.conf"
-          echo "TARGET_ARCHITECTURE=\"x86_64\"" >> "${{ github.workspace }}/haikuports.conf"
-          echo "HaikuPorter configuration created at ${{ github.workspace }}/haikuports.conf:"
-          cat "${{ github.workspace }}/haikuports.conf"
+          echo "TREE_PATH=\"~/haikuports\"" > "haikuports.conf"
+          echo "PACKAGER=\"Github Action Builder <actions@github.com>\"" >> "haikuports.conf"
+          echo "HaikuPorter configuration created at haikuports.conf:"
+          cat "haikuports.conf"
         shell: bash
 
       - name: Download Haiku Licenses
@@ -103,7 +105,7 @@ jobs:
           LICENSES_DIR_NAME=$(ls -d ${{ github.workspace }}/haiku-licenses-*/ | head -n 1 | xargs basename)
           echo "Using licenses directory: $LICENSES_DIR_NAME at ${{ github.workspace }}/$LICENSES_DIR_NAME"
 
-          haikuporter -q --config="${{ github.workspace }}/haikuports.conf"                     --licenses="${{ github.workspace }}/$LICENSES_DIR_NAME" --repository-update
+          haikuporter -q --config="/haikuports.conf" --licenses="${{ github.workspace }}/$LICENSES_DIR_NAME" --repository-update
         shell: bash
 
       - name: Save changed recipes list to a file for caching
@@ -135,28 +137,6 @@ jobs:
             repository/*.DependencyInfo
             changed_recipes_list.json
           key: ${{ runner.os }}-haiku-deps-${{ steps.get-master-ref.outputs.master_sha }}
-
-  build-haikuports: 
-    runs-on: ubuntu-latest
-    needs: prepare-build 
-    if: needs.prepare-build.outputs.has_changed_recipes == 'true'
-    env:
-      VM_CPU: 4
-      VM_RAM: 15G
-    container: docker.io/hectorm/qemu-haiku:latest
-
-    steps:
-      - name: Cache .DependencyInfo files and changed recipes list
-        id: cache-deps
-        uses: actions/cache@v4
-        with:
-          path: |
-            repository/*.DependencyInfo
-            changed_recipes_list.json
-          key: ${{ runner.os }}-haiku-deps-${{ needs.prepare-build.outputs.master_sha }}
-
-      - name: Wait until the VM is ready
-        run: container-init & timeout 600 vmshell exit 0
 
       - name: Install build dependencies and compilation tools in VM
         run: |
