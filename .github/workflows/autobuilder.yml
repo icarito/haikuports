@@ -199,15 +199,22 @@ jobs:
           docker exec haiku-vm vmshell "echo 'PACKAGER=\"GitHub Actions Builder <actions@github.com>\"' >> /boot/home/config/settings/haikuports.conf"
           docker exec haiku-vm vmshell "echo 'TARGET_ARCHITECTURE=\"x86_64\"' >> /boot/home/config/settings/haikuports.conf"
 
+      - name: Setup HaikuPorter and place .DependencyInfo files in VM
+        run: |
+          docker exec haiku-vm vmshell "mkdir -p /boot/home/config/settings"
+          docker exec haiku-vm vmshell "echo 'TREE_PATH=\"/boot/home/haikuports\"' > /boot/home/config/settings/haikuports.conf"
+          docker exec haiku-vm vmshell "echo 'PACKAGER=\"GitHub Actions Builder <actions@github.com>\"' >> /boot/home/config/settings/haikuports.conf"
+          docker exec haiku-vm vmshell "echo 'TARGET_ARCHITECTURE=\"x86_64\"' >> /boot/home/config/settings/haikuports.conf"
+
           if [ -f "changed_recipes_list.json" ]; then
             echo "Cached files found on runner. Transferring to VM..."
             # Transfer dependency info files
             if [ -d "repository" ]; then
               tar -czf dependency-infos.tar.gz repository/
-              cat dependency-infos.tar.gz | docker exec -i haiku-vm vmshell "cat > /dependency-infos.tar.gz"
+              docker cp dependency-infos.tar.gz haiku-vm:/dependency-infos.tar.gz
             fi
             # Transfer recipes list
-            cat changed_recipes_list.json | docker exec -i haiku-vm vmshell "cat > /changed_recipes_list.json"
+            docker cp changed_recipes_list.json haiku-vm:/changed_recipes_list.json
             
             docker exec haiku-vm vmshell "cd /boot/home/haikuports && \
               if [ -f /dependency-infos.tar.gz ]; then \
