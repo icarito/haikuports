@@ -11,7 +11,7 @@ jobs:
   prepare-build:
     runs-on: ubuntu-latest
     outputs:
-      changed_recipes_json: ${{ steps.detect-changes.outputs.changed_recipes_json }}
+      changed_recipes_space_separated: ${{ steps.detect-changes.outputs.changed_recipes_space_separated }}
       has_changed_recipes: ${{ steps.detect-changes.outputs.has_changed_recipes }}
       master_sha: ${{ steps.get-master-ref.outputs.master_sha }}
     steps:
@@ -63,7 +63,8 @@ jobs:
 
           if [ -z "$GIT_PRIMARY_BRANCH_REF" ]; then
             echo "::warning::No main or master branch found at origin to compare against. Assuming all recipes need checking."
-            CHANGED_RECIPES=$(find . -name '*.recipe' -printf '%h\n' | sed 's|^\./||' | sort -u)
+            # Get the directory name (package name) for all recipes
+            CHANGED_RECIPES=$(find . -name '*.recipe' -printf '%h\n' | sed 's|^\./||' | cut -d "/" -f 2 | sort -u | tr '\n' ' ')
             echo "build_all_flag=true" >> $GITHUB_OUTPUT 
           else
             echo "Primary branch for comparison: $GIT_PRIMARY_BRANCH_REF"
@@ -72,24 +73,24 @@ jobs:
               git fetch origin "$GITHUB_BASE_REF" --depth=1
               MERGE_BASE=$(git merge-base HEAD "$TARGET_REF")
               echo "Pull Request: Diffing from merge base $MERGE_BASE to HEAD ($GITHUB_SHA)"
-              CHANGED_RECIPES=$(git diff --name-only "$MERGE_BASE" HEAD -- '*/*.recipe' | sed 's|/[^/]*\.recipe$||g' | sort -u)
+              CHANGED_RECIPES=$(git diff --name-only "$MERGE_BASE" HEAD -- '*/*.recipe' | sed 's|/[^/]*\.recipe$||g' | cut -d "/" -f 2 | sort -u | tr '\n' ' ')
             else
               echo "Push/Manual Trigger: Diffing from $GIT_PRIMARY_BRANCH_REF to HEAD ($GITHUB_SHA)"
-              CHANGED_RECIPES=$(git diff --name-only "$GIT_PRIMARY_BRANCH_REF...HEAD" -- '*/*.recipe' | sed 's|/[^/]*\.recipe$||g' | sort -u)
+              CHANGED_RECIPES=$(git diff --name-only "$GIT_PRIMARY_BRANCH_REF...HEAD" -- '*/*.recipe' | sed 's|/[^/]*\.recipe$||g' | cut -d "/" -f 2 | sort -u | tr '\n' ' ')
             fi
             echo "build_all_flag=false" >> $GITHUB_OUTPUT
           fi
-          CHANGED_RECIPES=$(echo "$CHANGED_RECIPES" | sed '/^$/d')
+          # Remove trailing space if any
+          CHANGED_RECIPES=$(echo "$CHANGED_RECIPES" | sed 's/ *$//')
 
           if [ -z "$CHANGED_RECIPES" ]; then
             echo "No recipes changed."
-            echo "changed_recipes_json=[]" >> $GITHUB_OUTPUT
+            echo "changed_recipes_space_separated=" >> $GITHUB_OUTPUT
             echo "has_changed_recipes=false" >> $GITHUB_OUTPUT
           else
-            echo "Changed recipes found:"
+            echo "Changed recipes found (space separated list):"
             echo "$CHANGED_RECIPES"
-            CHANGED_RECIPES_JSON=$(echo "$CHANGED_RECIPES" | jq -R -s -c 'split("\n") | map(select(length > 0))')
-            echo "changed_recipes_json=$CHANGED_RECIPES_JSON" >> $GITHUB_OUTPUT
+            echo "changed_recipes_space_separated=$CHANGED_RECIPES" >> $GITHUB_OUTPUT
             echo "has_changed_recipes=true" >> $GITHUB_OUTPUT
           fi
         shell: bash
@@ -104,13 +105,6 @@ jobs:
           echo "Using licenses directory: $LICENSES_DIR_NAME at ${{ github.workspace }}/$LICENSES_DIR_NAME"
 
           haikuporter -q --config="${{ github.workspace }}/haikuports.conf"                     --licenses="${{ github.workspace }}/$LICENSES_DIR_NAME" --repository-update
-        shell: bash
-
-      - name: Save changed recipes list to a file for caching
-        if: steps.detect-changes.outputs.has_changed_recipes == 'true'
-        run: |
-          echo '${{ steps.detect-changes.outputs.changed_recipes_json }}' > changed_recipes_list.json
-          echo "Saved changed recipes JSON to changed_recipes_list.json for caching."
         shell: bash
         
       - name: Get master branch commit for cache key
@@ -127,13 +121,12 @@ jobs:
           echo "Using master SHA for cache key: $MASTER_SHA"
         shell: bash
 
-      - name: Cache .DependencyInfo files and changed recipes list
+      - name: Cache .DependencyInfo files
         id: cache-deps
         uses: actions/cache@v4
         with:
           path: |
             repository/*
-            changed_recipes_list.json
           key: ${{ runner.os }}-haiku-deps-${{ steps.get-master-ref.outputs.master_sha }}
 
   build-haikuports: 
@@ -142,13 +135,12 @@ jobs:
     if: needs.prepare-build.outputs.has_changed_recipes == 'true'
 
     steps:
-      - name: Restore cached DependencyInfo files and recipes list
+      - name: Restore cached DependencyInfo files
         id: restore-cache
         uses: actions/cache/restore@v4
         with:
           path: |
             repository/*
-            changed_recipes_list.json
           key: ${{ runner.os }}-haiku-deps-${{ needs.prepare-build.outputs.master_sha }}
 
       - name: Debug cache restore results
@@ -159,14 +151,6 @@ jobs:
           echo "Master SHA from prepare-build: ${{ needs.prepare-build.outputs.master_sha }}"
           echo "Files in current directory:"
           ls -la
-          echo "Looking for changed_recipes_list.json:"
-          if [ -f "changed_recipes_list.json" ]; then
-            echo "✓ changed_recipes_list.json found"
-            echo "Content:"
-            cat changed_recipes_list.json
-          else
-            echo "✗ changed_recipes_list.json NOT found"
-          fi
           echo "Looking for repository directory:"
           if [ -d "repository" ]; then
             echo "✓ repository directory found"
@@ -231,81 +215,50 @@ jobs:
           docker exec haiku-vm vmshell "echo 'TARGET_ARCHITECTURE=\"x86_64\"' >> /boot/home/config/settings/haikuports.conf"
 
           echo "--- Transferring cached files to VM ---"
-          if [ -f "changed_recipes_list.json" ]; then
-            echo "Transferring changed_recipes_list.json to VM..."
-            cat changed_recipes_list.json | docker exec -i haiku-vm vmshell "mkdir -p /boot/home/haikuports && cat > /boot/home/haikuports/changed_recipes_list.json"
-            echo "Transferred changed_recipes_list.json."
-            docker exec -i haiku-vm vmshell "echo 'Content of changed_recipes_list.json in VM:'; cat /boot/home/haikuports/changed_recipes_list.json"
-          else
-            echo "changed_recipes_list.json not found on runner. Creating empty list in VM."
-            docker exec haiku-vm vmshell "mkdir -p /boot/home/haikuports && echo '[]' > /boot/home/haikuports/changed_recipes_list.json"
-          fi
+          echo "Creating changed_recipes_list.txt in VM from needs context..."
+          echo '${{ needs.prepare-build.outputs.changed_recipes_space_separated }}' | docker exec -i haiku-vm vmshell "mkdir -p /boot/home/haikuports && cat > /boot/home/haikuports/changed_recipes_list.txt"
+          echo "Transferred changed_recipes_list.txt to VM using needs context."
+          docker exec -i haiku-vm vmshell "echo 'Content of changed_recipes_list.txt in VM:'; cat /boot/home/haikuports/changed_recipes_list.txt"
 
           if [ -d "repository" ]; then
             echo "Creating dependency-infos.tar.gz on runner..."
-            tar -czf dependency-infos.tar.gz repository
+            tar -czf dependency-infos.tar.gz -C repository .
             echo "Transferring dependency-infos.tar.gz to VM..."
-            cat dependency-infos.tar.gz | docker exec -i haiku-vm vmshell "mkdir -p /boot/home/haikuports && cat > /boot/home/haikuports/dependency-infos.tar.gz"
-            rm dependency-infos.tar.gz # Clean up on runner
-            
-            echo "Extracting dependency-infos.tar.gz in VM..."
-            docker exec haiku-vm vmshell "cd /boot/home/haikuports && \
-              if [ -f dependency-infos.tar.gz ]; then \
-                tar -xzf dependency-infos.tar.gz && \
-                rm dependency-infos.tar.gz && \
-                echo 'DependencyInfo files extracted and archive removed in VM.' && \
-                echo 'Listing /boot/home/haikuports/repository/ in VM (head):' && \
-                ls -la repository/ | head -10 ; \
-              else \
-                echo 'ERROR: dependency-infos.tar.gz not found in /boot/home/haikuports/ in VM after transfer.' ; \
-              fi"
+            cat dependency-infos.tar.gz | docker exec -i haiku-vm vmshell "mkdir -p /boot/home/haikuports/repository && cat > /boot/home/haikuports/dependency-infos.tar.gz"
+            docker exec haiku-vm vmshell "cd /boot/home/haikuports && tar -xzf dependency-infos.tar.gz -C repository"
+            echo "Transferred and extracted dependency-infos.tar.gz to /boot/home/haikuports/repository in VM."
+            docker exec haiku-vm vmshell "echo 'Contents of /boot/home/haikuports/repository:'; ls -la /boot/home/haikuports/repository"
           else
-            echo "repository/ directory not found on runner. No .DependencyInfo files to transfer."
+            echo "✗ repository directory not found on runner. No .DependencyInfo files to transfer."
             docker exec haiku-vm vmshell "mkdir -p /boot/home/haikuports/repository" # Ensure dir exists
           fi
-          echo "--- Finished transferring cached files ---"
 
       - name: Build modified packages with haikuporter
         run: |
           echo "=== DEBUG: Checking files in VM before build ==="
           docker exec haiku-vm vmshell "cd /boot/home/haikuports && \
-            echo 'Reading list of changed packages from /boot/home/haikuports/changed_recipes_list.json' && \
-            if [ -f /boot/home/haikuports/changed_recipes_list.json ]; then \
-              echo 'Found recipes list file' && \
-              PACKAGES_JSON=\$(cat /boot/home/haikuports/changed_recipes_list.json) && \
-              echo \"Packages to build (JSON): \$PACKAGES_JSON\" ; \
-            else \
-              echo 'ERROR: /boot/home/haikuports/changed_recipes_list.json not found!' && \
-              echo 'Files in /boot/home/haikuports/:' && \
-              ls -la /boot/home/haikuports/ && \
-              PACKAGES_JSON='[]' ; \
-            fi && \
+            echo 'Reading list of changed packages' && \
+            RECIPE_ARGS='${{ needs.prepare-build.outputs.changed_recipes_space_separated }}' && \
             \
-            mkdir -p packages && \
-            mkdir -p repository && \
-            \
-            # Convert JSON array to space-separated arguments
-            RECIPE_ARGS=\$(echo \"\$PACKAGES_JSON\" | jq -r '.[]' | tr '\n' ' ') && \
-            \
-            if [ -z \"\$RECIPE_ARGS\" ] || [ \"\$RECIPE_ARGS\" = \" \" ]; then \
+            if [ -z \"$RECIPE_ARGS\" ]; then \
               echo 'No packages specified to build.' ; \
             else \
-              echo \"Building packages: \$RECIPE_ARGS\" ; \
-              if haikuporter \$RECIPE_ARGS -S -j4 --no-repository-update; then \
+              echo \"Building packages: $RECIPE_ARGS\" ; \
+              if haikuporter $RECIPE_ARGS -S -j4 --no-repository-update; then \
                 echo \"✓ HaikuPorter build completed successfully.\" ; \
               else \
-                BUILD_FAILURE_CODE=\$? ; \
-                echo \"✗ HaikuPorter build failed with exit code \$BUILD_FAILURE_CODE.\" ; \
-                exit \$BUILD_FAILURE_CODE ; \
+                BUILD_FAILURE_CODE=$? ; \
+                echo \"✗ HaikuPorter build failed with exit code $BUILD_FAILURE_CODE.\" ; \
+                exit $BUILD_FAILURE_CODE ; \
               fi ; \
             fi ; \
             \
             echo \"Build summary:\" ; \
-            NUM_PACKAGES=\$(echo \"\$PACKAGES_JSON\" | jq -r '. | length') ; \
-            echo \"- Packages attempted: \$NUM_PACKAGES\" ; \
+            NUM_PACKAGES=$(echo \"$RECIPE_ARGS\" | wc -w) ; \
+            echo \"- Packages attempted: $NUM_PACKAGES\" ; \
             if [ -d packages ] && ls packages/*.hpkg >/dev/null 2>&1; then \
-              echo \"- Built packages: \$(ls packages/*.hpkg | wc -l)\" ; \
-              echo \"- Package files: \$(ls packages/*.hpkg | xargs basename -a | tr '\n' ' ')\" ; \
+              echo \"- Built packages: $(ls packages/*.hpkg | wc -l)\" ; \
+              echo \"- Package files: $(ls packages/*.hpkg | xargs basename -a | tr '\n' ' ')\" ; \
             else \
               echo \"- Built packages: 0\" ; \
             fi"
@@ -350,8 +303,7 @@ jobs:
           echo "**Trigger:** ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
-          PACKAGES_JSON_STRING='${{ needs.prepare-build.outputs.changed_recipes_json }}'
-          DISPLAY_PACKAGES=$(echo "$PACKAGES_JSON_STRING" | jq -r '. | join(", ")' 2>/dev/null || echo "$PACKAGES_JSON_STRING")
-          echo "**Packages processed:** $DISPLAY_PACKAGES" >> $GITHUB_STEP_SUMMARY
+          PACKAGES_STRING='${{ needs.prepare-build.outputs.changed_recipes_space_separated }}'
+          echo "**Packages processed:** $PACKAGES_STRING" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Artifacts:** Check the uploaded build artifacts for built packages and logs." >> $GITHUB_STEP_SUMMARY
