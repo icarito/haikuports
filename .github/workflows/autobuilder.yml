@@ -239,18 +239,14 @@ jobs:
           docker exec haiku-vm vmshell "cd /boot/home/haikuports && \
             echo 'Reading list of changed packages' && \
             RECIPE_ARGS='${{ needs.prepare-build.outputs.changed_recipes_space_separated }}' && \
-            \
-            if [ -z \"$RECIPE_ARGS\" ]; then \
-              echo 'No packages specified to build.' ; \
+            echo \"Changed packages: \$RECIPE_ARGS\" && \
+            echo \"Building packages: $RECIPE_ARGS\" ; \
+            if haikuporter $RECIPE_ARGS -S -j4 --no-repository-update; then \
+              echo \"✓ HaikuPorter build completed successfully.\" ; \
             else \
-              echo \"Building packages: $RECIPE_ARGS\" ; \
-              if haikuporter $RECIPE_ARGS -S -j4 --no-repository-update; then \
-                echo \"✓ HaikuPorter build completed successfully.\" ; \
-              else \
-                BUILD_FAILURE_CODE=$? ; \
-                echo \"✗ HaikuPorter build failed with exit code $BUILD_FAILURE_CODE.\" ; \
-                exit $BUILD_FAILURE_CODE ; \
-              fi ; \
+              BUILD_FAILURE_CODE=$? ; \
+              echo \"✗ HaikuPorter build failed with exit code $BUILD_FAILURE_CODE.\" ; \
+              exit $BUILD_FAILURE_CODE ; \
             fi ; \
             \
             echo \"Build summary:\" ; \
