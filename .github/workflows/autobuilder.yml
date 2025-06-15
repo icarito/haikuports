@@ -146,9 +146,6 @@ jobs:
     container: docker.io/hectorm/qemu-haiku:latest
 
     steps:
-      - name: Wait until the VM is ready
-        run: container-init & timeout 600 vmshell exit 0
-
       - name: Cache .DependencyInfo files and changed recipes list
         id: cache-deps
         uses: actions/cache@v4
@@ -157,6 +154,9 @@ jobs:
             repository/*.DependencyInfo
             changed_recipes_list.json
           key: ${{ runner.os }}-haiku-deps-${{ needs.prepare-build.outputs.master_sha }}
+
+      - name: Wait until the VM is ready
+        run: container-init & timeout 600 vmshell exit 0
 
       - name: Install build dependencies and compilation tools in VM
         run: |
