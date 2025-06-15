@@ -140,15 +140,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: prepare-build 
     if: needs.prepare-build.outputs.has_changed_recipes == 'true'
-    env:
-      VM_CPU: 4
-      VM_RAM: 15G
-    container: docker.io/hectorm/qemu-haiku:latest
 
     steps:
-      - name: Wait until the VM is ready
-        run: container-init & timeout 600 vmshell exit 0
-
       - name: Restore cached DependencyInfo files and recipes list
         id: restore-cache
         uses: actions/cache/restore@v4
@@ -158,9 +151,22 @@ jobs:
             changed_recipes_list.json
           key: ${{ runner.os }}-haiku-deps-${{ needs.prepare-build.outputs.master_sha }}
 
+      - name: Start Haiku VM container
+        env:
+          VM_CPU: 4
+          VM_RAM: 15G
+        run: |
+          docker run -d --name haiku-vm \
+            -e VM_CPU="$VM_CPU" \
+            -e VM_RAM="$VM_RAM" \
+            docker.io/hectorm/qemu-haiku:latest
+          
+          # Wait for container to be ready
+          timeout 600 docker exec haiku-vm sh -c 'container-init & timeout 600 vmshell exit 0'
+
       - name: Install build dependencies and compilation tools in VM
         run: |
-          vmshell pkgman install -y \
+          docker exec haiku-vm vmshell pkgman install -y \
             gcc binutils make cmake autoconf automake \
             bison flex gawk gettext git gmp gperf grep \
             libtool m4 nasm ncurses6 patch pkgconf \
@@ -181,29 +187,29 @@ jobs:
 
       - name: Checkout HaikuPorts repository in VM
         run: |
-          vmshell "mkdir -p /boot/home/haikuports && \
+          docker exec haiku-vm vmshell "mkdir -p /boot/home/haikuports && \
             git clone https://github.com/${GITHUB_REPOSITORY}.git /boot/home/haikuports && \
             cd /boot/home/haikuports && \
             git checkout ${GITHUB_SHA}"
 
       - name: Setup HaikuPorter and place .DependencyInfo files in VM
         run: |
-          vmshell "mkdir -p /boot/home/config/settings"
-          vmshell "echo 'TREE_PATH=\"/boot/home/haikuports\"' > /boot/home/config/settings/haikuports.conf"
-          vmshell "echo 'PACKAGER=\"GitHub Actions Builder <actions@github.com>\"' >> /boot/home/config/settings/haikuports.conf"
-          vmshell "echo 'TARGET_ARCHITECTURE=\"x86_64\"' >> /boot/home/config/settings/haikuports.conf"
+          docker exec haiku-vm vmshell "mkdir -p /boot/home/config/settings"
+          docker exec haiku-vm vmshell "echo 'TREE_PATH=\"/boot/home/haikuports\"' > /boot/home/config/settings/haikuports.conf"
+          docker exec haiku-vm vmshell "echo 'PACKAGER=\"GitHub Actions Builder <actions@github.com>\"' >> /boot/home/config/settings/haikuports.conf"
+          docker exec haiku-vm vmshell "echo 'TARGET_ARCHITECTURE=\"x86_64\"' >> /boot/home/config/settings/haikuports.conf"
 
           if [ -f "changed_recipes_list.json" ]; then
             echo "Cached files found on runner. Transferring to VM..."
             # Transfer dependency info files
             if [ -d "repository" ]; then
               tar -czf dependency-infos.tar.gz repository/
-              cat dependency-infos.tar.gz | vmshell "cat > /dependency-infos.tar.gz"
+              cat dependency-infos.tar.gz | docker exec -i haiku-vm vmshell "cat > /dependency-infos.tar.gz"
             fi
             # Transfer recipes list
-            cat changed_recipes_list.json | vmshell "cat > /changed_recipes_list.json"
+            cat changed_recipes_list.json | docker exec -i haiku-vm vmshell "cat > /changed_recipes_list.json"
             
-            vmshell "cd /boot/home/haikuports && \
+            docker exec haiku-vm vmshell "cd /boot/home/haikuports && \
               if [ -f /dependency-infos.tar.gz ]; then \
                 echo 'Extracting .DependencyInfo files...' && \
                 tar -xzf /dependency-infos.tar.gz && \
@@ -213,12 +219,12 @@ jobs:
             echo "Files transferred and extracted in VM."
           else
             echo "No cached files found on runner."
-            vmshell "echo '[]' > /changed_recipes_list.json"
+            docker exec haiku-vm vmshell "echo '[]' > /changed_recipes_list.json"
           fi
 
       - name: Build modified packages with haikuporter
         run: |
-          vmshell "cd /boot/home/haikuports && \
+          docker exec haiku-vm vmshell "cd /boot/home/haikuports && \
             echo 'Reading list of changed packages from /changed_recipes_list.json' && \
             PACKAGES_JSON=\$(cat /changed_recipes_list.json) && \
             echo \"Packages to build (JSON): \$PACKAGES_JSON\" && \
@@ -256,7 +262,7 @@ jobs:
         if: always()
         run: |
           mkdir -p build-artifacts
-          vmshell "cd /boot/home/haikuports && \
+          docker exec haiku-vm vmshell "cd /boot/home/haikuports && \
             if [ -d packages ] && ls packages/*.hpkg >/dev/null 2>&1; then
               echo 'Collecting built packages:'
               ls -la packages/*.hpkg
@@ -271,8 +277,8 @@ jobs:
             else
               tar -czf /build-logs.tar.gz --files-from /dev/null
             fi"
-          vmshell cat /built-packages.tar.gz > build-artifacts/built-packages.tar.gz || true
-          vmshell cat /build-logs.tar.gz > build-artifacts/build-logs.tar.gz || true
+          docker exec haiku-vm vmshell cat /built-packages.tar.gz > build-artifacts/built-packages.tar.gz || true
+          docker exec haiku-vm vmshell cat /build-logs.tar.gz > build-artifacts/build-logs.tar.gz || true
 
       - name: Upload build artifacts
         if: always()
