@@ -102,58 +102,9 @@ jobs:
           LICENSES_DIR_NAME=$(ls -d ${{ github.workspace }}/haiku-licenses-*/ | head -n 1 | xargs basename)
           echo "Using licenses directory: $LICENSES_DIR_NAME at ${{ github.workspace }}/$LICENSES_DIR_NAME"
 
-          haikuporter --config="${{ github.workspace }}/haikuports.conf"                     --licenses="${{ github.workspace }}/$LICENSES_DIR_NAME"                     --repository-update
-
-          echo "Checking contents of changed recipe directories after --repository-update:"
-          CHECK_CHANGED_RECIPES_JSON='${{ steps.detect-changes.outputs.changed_recipes_json }}'
-          if [ "$CHECK_CHANGED_RECIPES_JSON" == "[]" ] || [ -z "$CHECK_CHANGED_RECIPES_JSON" ]; then
-            echo "No changed recipes were detected by the previous step."
-          else
-            echo "$CHECK_CHANGED_RECIPES_JSON" | jq -r '.[]' | while read recipe_path_to_check; do
-              if [ -n "$recipe_path_to_check" ]; then
-                CHECK_DIR="${{ github.workspace }}/$recipe_path_to_check"
-                if [ -d "$CHECK_DIR" ]; then
-                  echo "Listing contents of $CHECK_DIR:"
-                  ls -la "$CHECK_DIR"
-                else
-                  echo "::warning::Directory not found for checking: $CHECK_DIR"
-                fi
-              fi
-            done
-          fi
-
-          echo "Collecting .DependencyInfo files for specifically changed recipes..."
-          mkdir -p dependency-infos # This is the staging directory for caching
-
-          CHANGED_RECIPES_JSON='${{ steps.detect-changes.outputs.changed_recipes_json }}'
-          if [ "$CHANGED_RECIPES_JSON" == "[]" ] || [ -z "$CHANGED_RECIPES_JSON" ]; then
-            echo "No changed recipes list provided by detect-changes step, nothing to collect for cache."
-          else
-            echo "$CHANGED_RECIPES_JSON" | jq -r '.[]' | while read recipe_path; do
-              if [ -n "$recipe_path" ]; then
-                SOURCE_RECIPE_DIR="${{ github.workspace }}/$recipe_path"
-                TARGET_CACHE_SUBDIR="dependency-infos/$recipe_path" # Staging subdir for this recipe's deps
-
-                echo "Staging .DependencyInfo files from $SOURCE_RECIPE_DIR for recipe $recipe_path"
-                if [ -d "$SOURCE_RECIPE_DIR" ]; then
-                  mkdir -p "$TARGET_CACHE_SUBDIR"
-                  # Copy .DependencyInfo files from the main tree (updated by --repository-update)
-                  # to the staging area for caching.
-                  # Use a subshell for find to avoid error if no files found.
-                  (find "$SOURCE_RECIPE_DIR" -maxdepth 1 -name "*.DependencyInfo" -print -exec cp {} "$TARGET_CACHE_SUBDIR/" \;)
-                  if [ "$(ls -A $TARGET_CACHE_SUBDIR 2>/dev/null)" ]; then
-                     echo "Successfully staged .DependencyInfo files from $SOURCE_RECIPE_DIR to $TARGET_CACHE_SUBDIR"
-                  else
-                     echo "No .DependencyInfo files found or copied from $SOURCE_RECIPE_DIR for $recipe_path"
-                  fi
-                else
-                  echo "::warning::Source recipe directory not found: $SOURCE_RECIPE_DIR for changed recipe $recipe_path. Cannot stage .DependencyInfo files."
-                fi
-              fi
-            done
-          fi
-          echo "Listing content of dependency-infos (staged for cache):"
-          ls -R dependency-infos
+          haikuporter -q --config="${{ github.workspace }}/haikuports.conf"                     --licenses="${{ github.workspace }}/$LICENSES_DIR_NAME"                     --repository-update
+          ls -R repository | wc -l
+          echo "Repository updated. .DependencyInfo files generated for changed recipes."
         shell: bash
 
       - name: Save changed recipes list to a file for caching
@@ -168,6 +119,6 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            dependency-infos
+            repository/*.DependencyInfo
             changed_recipes_list.json
           key: ${{ runner.os }}-haiku-deps-${{ github.sha }}
