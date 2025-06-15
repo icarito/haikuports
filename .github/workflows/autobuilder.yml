@@ -149,8 +149,8 @@ jobs:
       - name: Wait until the VM is ready
         run: container-init & timeout 600 vmshell exit 0
 
-      - name: Restore cached DependencyInfo files and recipes list
-        id: restore-cache
+      - name: Cache .DependencyInfo files and changed recipes list
+        id: cache-deps
         uses: actions/cache@v4
         with:
           path: |
