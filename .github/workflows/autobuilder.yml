@@ -234,13 +234,14 @@ jobs:
           fi
 
       - name: Build modified packages with haikuporter
+        id: build-packages
         run: |
           echo "=== DEBUG: Checking files in VM before build ==="
           docker exec haiku-vm vmshell "cd /boot/home/haikuports && \
             echo 'Reading list of changed packages' && \
             RECIPE_ARGS='${{ needs.prepare-build.outputs.changed_recipes_space_separated }}' && \
             echo \"Changed packages: \$RECIPE_ARGS\" && \
-            if haikuporter $RECIPE_ARGS -j4 --no-repository-update; then \
+            if haikuporter \$RECIPE_ARGS -j4 --no-repository-update; then \
               echo \"✓ HaikuPorter build completed successfully.\" ; \
             else \
               BUILD_FAILURE_CODE=$? ; \
@@ -259,7 +260,6 @@ jobs:
             fi"
 
       - name: Collect build artifacts
-        if: always()
         run: |
           mkdir -p build-artifacts
           docker exec haiku-vm vmshell "cd /boot/home/haikuports && \
