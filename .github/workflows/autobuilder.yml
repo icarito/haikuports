@@ -171,7 +171,7 @@ jobs:
           if [ -d "repository" ]; then
             echo "✓ repository directory found"
             echo "Contents:"
-            ls -la repository/
+            ls -la repository/ | head -n 10
           else
             echo "✗ repository directory NOT found"
           fi
@@ -291,7 +291,7 @@ jobs:
               echo 'No packages specified to build.' ; \
             else \
               echo \"Building packages: \$RECIPE_ARGS\" ; \
-              if haikuporter \$RECIPE_ARGS -S -j4; then \
+              if haikuporter \$RECIPE_ARGS -S -j4 --no-repository-update; then \
                 echo \"✓ HaikuPorter build completed successfully.\" ; \
               else \
                 BUILD_FAILURE_CODE=\$? ; \
