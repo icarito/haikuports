@@ -121,12 +121,58 @@ jobs:
           echo "Using master SHA for cache key: $MASTER_SHA"
         shell: bash
 
-      - name: Cache .DependencyInfo files
+      - name: Package changed ports
+        id: package-ports
+        if: steps.detect-changes.outputs.has_changed_recipes == 'true'
+        run: |
+          echo "Packaging changed ports directories..."
+          CHANGED_RECIPES='${{ steps.detect-changes.outputs.changed_recipes_space_separated }}'
+          echo "Changed recipes: $CHANGED_RECIPES"
+          
+          # Create a temporary directory to collect the changed ports
+          mkdir -p changed_ports_temp
+          
+          for recipe in $CHANGED_RECIPES; do
+            echo "Looking for directories containing recipe: $recipe"
+            # Find all directories that contain this recipe
+            find . -name "*.recipe" -path "*/$recipe/*" -printf '%h\n' | while read dir; do
+              if [ -d "$dir" ]; then
+                # Extract the category and port name from the path
+                category=$(echo "$dir" | cut -d'/' -f2)
+                port=$(echo "$dir" | cut -d'/' -f3)
+                echo "Found port directory: $category/$port"
+                
+                # Create category directory in temp if it doesn't exist
+                mkdir -p "changed_ports_temp/$category"
+                
+                # Copy the entire port directory
+                cp -r "$dir" "changed_ports_temp/$category/"
+                echo "Copied $dir to changed_ports_temp/$category/$port"
+              fi
+            done
+          done
+          
+          # Create the tar.gz file
+          if [ -d "changed_ports_temp" ] && [ "$(ls -A changed_ports_temp)" ]; then
+            tar -czf changed_ports.tar.gz -C changed_ports_temp .
+            echo "Created changed_ports.tar.gz with contents:"
+            tar -tzf changed_ports.tar.gz | head -n 20
+          else
+            echo "No port directories found to package"
+            tar -czf changed_ports.tar.gz --files-from /dev/null
+          fi
+          
+          # Clean up temp directory
+          rm -rf changed_ports_temp
+        shell: bash
+
+      - name: Cache .DependencyInfo files and changed ports
         id: cache-deps
         uses: actions/cache@v4
         with:
           path: |
             repository/*
+            changed_ports.tar.gz
           key: ${{ runner.os }}-haiku-deps-${{ steps.get-master-ref.outputs.master_sha }}
 
   build-haikuports: 
@@ -135,12 +181,13 @@ jobs:
     if: needs.prepare-build.outputs.has_changed_recipes == 'true'
 
     steps:
-      - name: Restore cached DependencyInfo files
+      - name: Restore cached DependencyInfo files and changed ports
         id: restore-cache
         uses: actions/cache/restore@v4
         with:
           path: |
             repository/*
+            changed_ports.tar.gz
           key: ${{ runner.os }}-haiku-deps-${{ needs.prepare-build.outputs.master_sha }}
 
       - name: Debug cache restore results
@@ -158,6 +205,15 @@ jobs:
             ls -la repository/ | head -n 10
           else
             echo "✗ repository directory NOT found"
+          fi
+          echo "Looking for changed_ports.tar.gz:"
+          if [ -f "changed_ports.tar.gz" ]; then
+            echo "✓ changed_ports.tar.gz found"
+            echo "Size: $(du -h changed_ports.tar.gz | cut -f1)"
+            echo "Contents preview:"
+            tar -tzf changed_ports.tar.gz | head -n 10
+          else
+            echo "✗ changed_ports.tar.gz NOT found"
           fi
 
       - name: Start Haiku VM container
@@ -197,15 +253,22 @@ jobs:
             json_glib_devel json_glib wayland_protocols gtk_doc \
             zstd_devel zstd
 
-      - name: Checkout HaikuPorts repository in VM
+      - name: Transfer changed ports to VM
         run: |
-          docker exec haiku-vm vmshell "mkdir -p /boot/home/haikuports && \
-            git clone https://github.com/${GITHUB_REPOSITORY}.git /boot/home/haikuports && \
-            cd /boot/home/haikuports && \
-            echo \"Attempting to fetch GITHUB_REF: ${GITHUB_REF}\" && \
-            git fetch origin \"${GITHUB_REF}:${GITHUB_REF}\" && \
-            echo \"Successfully fetched GITHUB_REF. Attempting checkout of GITHUB_SHA: ${GITHUB_SHA}\" && \
-            git checkout \"${GITHUB_SHA}\""
+          echo "Creating base haikuports directory structure in VM..."
+          docker exec haiku-vm vmshell "mkdir -p /boot/home/haikuports"
+          
+          if [ -f "changed_ports.tar.gz" ]; then
+            echo "Transferring changed_ports.tar.gz to VM..."
+            cat changed_ports.tar.gz | docker exec -i haiku-vm vmshell "cat > /boot/home/haikuports/changed_ports.tar.gz"
+            echo "Extracting changed ports in VM..."
+            docker exec haiku-vm vmshell "cd /boot/home/haikuports && tar -xzf changed_ports.tar.gz"
+            echo "Transferred and extracted changed ports to /boot/home/haikuports in VM."
+            docker exec haiku-vm vmshell "echo 'Contents of /boot/home/haikuports:'; ls -la /boot/home/haikuports"
+          else
+            echo "✗ changed_ports.tar.gz not found on runner. Cannot transfer ports."
+            exit 1
+          fi
 
       - name: Setup HaikuPorter and place .DependencyInfo files in VM
         run: |
@@ -214,12 +277,7 @@ jobs:
           docker exec haiku-vm vmshell "echo 'PACKAGER=\"GitHub Actions Builder <actions@github.com>\"' >> /boot/home/config/settings/haikuports.conf"
           docker exec haiku-vm vmshell "echo 'TARGET_ARCHITECTURE=\"x86_64\"' >> /boot/home/config/settings/haikuports.conf"
 
-          echo "--- Transferring cached files to VM ---"
-          echo "Creating changed_recipes_list.txt in VM from needs context..."
-          echo '${{ needs.prepare-build.outputs.changed_recipes_space_separated }}' | docker exec -i haiku-vm vmshell "mkdir -p /boot/home/haikuports && cat > /boot/home/haikuports/changed_recipes_list.txt"
-          echo "Transferred changed_recipes_list.txt to VM using needs context."
-          docker exec -i haiku-vm vmshell "echo 'Content of changed_recipes_list.txt in VM:'; cat /boot/home/haikuports/changed_recipes_list.txt"
-
+          echo "--- Transferring cached dependency files to VM ---"
           if [ -d "repository" ]; then
             echo "Creating dependency-infos.tar.gz on runner..."
             tar -czf dependency-infos.tar.gz -C repository .
