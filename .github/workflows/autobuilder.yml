@@ -284,7 +284,7 @@ jobs:
           # Read PROVIDES fields from each new recipe
           COLLECTED_PROVIDES=""
           # For recipe file in changed_ports.tar.gz, source the recipe and collect PROVIDES
-          for recipe in $(tar -tzf changed_ports.tar.gz | grep '\.recipe$' | grep -v 'work'); do
+          for recipe in $(ls */*/*.recipe | grep '\.recipe$' | grep -v 'work'); do
               echo "Processing recipe: $recipe"
               COLLECTED_PROVIDES+=$(docker exec haiku-vm vmshell "cd /boot/home/haikuports && \
                 source \"$recipe\" && \
