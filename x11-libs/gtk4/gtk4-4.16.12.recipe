@@ -40,7 +40,9 @@ PROVIDES="
 	cmd:gtk4_update_icon_cache$commandSuffix
 	cmd:gtk4_encode_symbolic_svg$commandSuffix
 	cmd:gtk4_launch$commandSuffix
+	lib:libgtk4$secondaryArchSuffix = 1.1600.12 compat >= 1
 	lib:libgtk_4$secondaryArchSuffix = 1.1600.12 compat >= 1
+	gtk4
 	"
 REQUIRES="
 	haiku$secondaryArchSuffix
