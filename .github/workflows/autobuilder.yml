@@ -13,8 +13,7 @@ jobs:
     outputs:
       changed_recipes_space_separated: ${{ steps.detect-changes.outputs.changed_recipes_space_separated }}
       has_changed_recipes: ${{ steps.detect-changes.outputs.has_changed_recipes }}
-      current_sha: ${{ steps.get-current-ref.outputs.current_sha }}
-      master_sha: ${{ steps.get-current-ref.outputs.master_sha }}
+      current_sha: ${{ github.sha }}
     steps:
       - name: Checkout HaikuPorts repository
         uses: actions/checkout@v4
@@ -94,30 +93,12 @@ jobs:
           fi
         shell: bash
 
-      - name: Get current commit for cache key
-        id: get-current-ref
-        run: |
-          CURRENT_SHA=${{ github.sha }}
-          echo "current_sha=$CURRENT_SHA" >> $GITHUB_OUTPUT
-          echo "Using current commit SHA for cache key: $CURRENT_SHA"
-          
-          if git rev-parse --verify origin/main >/dev/null 2>&1; then
-            MASTER_SHA=$(git rev-parse origin/main)
-          elif git rev-parse --verify origin/master >/dev/null 2>&1; then
-            MASTER_SHA=$(git rev-parse origin/master)
-          else
-            MASTER_SHA=${{ github.sha }}
-          fi
-          echo "master_sha=$MASTER_SHA" >> $GITHUB_OUTPUT
-          echo "Master SHA for fallback: $MASTER_SHA"
-        shell: bash
-
       - name: Update Repository and Stage Dependency Infos
         id: generate-deps
         if: steps.detect-changes.outputs.has_changed_recipes == 'true'
         run: |
           echo "Updating HaikuPorter repository to generate/update all .DependencyInfo files..."
-          echo "Working on commit: ${{ steps.get-current-ref.outputs.current_sha }}"
+          echo "Working on commit: ${{ github.sha }}"
           git log --oneline -n 3
           
           LICENSES_DIR_NAME=$(ls -d ${{ github.workspace }}/haiku-licenses-*/ | head -n 1 | xargs basename)
@@ -163,10 +144,9 @@ jobs:
           path: |
             repository/*
             changed_ports.tar.gz
-          key: ${{ runner.os }}-haiku-deps-${{ steps.get-current-ref.outputs.current_sha }}
+          key: ${{ runner.os }}-haiku-deps-${{ github.sha }}
           restore-keys: |
-            ${{ runner.os }}-haiku-deps-${{ steps.get-current-ref.outputs.current_sha }}
-            ${{ runner.os }}-haiku-deps-
+            ${{ runner.os }}-haiku-deps-${{ github.sha }}
 
   build-haikuports: 
     runs-on: ubuntu-latest
@@ -181,17 +161,17 @@ jobs:
           path: |
             repository/*
             changed_ports.tar.gz
-          key: ${{ runner.os }}-haiku-deps-${{ needs.prepare-build.outputs.current_sha }}
+          key: ${{ runner.os }}-haiku-deps-${{ github.sha }}
           restore-keys: |
-            ${{ runner.os }}-haiku-deps-${{ needs.prepare-build.outputs.current_sha}}
+            ${{ runner.os }}-haiku-deps-${{ github.sha }}
             ${{ runner.os }}-haiku-deps-
 
       - name: Debug cache restore results
         run: |
           echo "=== DEBUG: Cache restore results ==="
           echo "Cache hit result: ${{ steps.restore-cache.outputs.cache-hit }}"
-          echo "Cache key used: ${{ runner.os }}-haiku-deps-${{ needs.prepare-build.outputs.current_sha }}"
-          echo "Current SHA from prepare-build: ${{ needs.prepare-build.outputs.current_sha }}"
+          echo "Cache key used: ${{ runner.os }}-haiku-deps-${{ github.sha }}"
+          echo "Current SHA from prepare-build: ${{ github.sha }}"
           echo "Files in current directory:"
           ls -la
           echo "Looking for repository directory:"
@@ -283,7 +263,7 @@ jobs:
           # Read PROVIDES fields from each new recipe
           COLLECTED_PROVIDES=""
           # For recipe file in changed_ports.tar.gz, source the recipe and collect PROVIDES
-          for recipe in $(ls */*/*.recipe | grep '\.recipe$' | grep -v 'work'); do
+          for recipe in $(tar -tzf changed_ports.tar.gz | grep '\.recipe$' | grep -v 'work'); do
               echo "Processing recipe: $recipe"
               COLLECTED_PROVIDES+=$(docker exec haiku-vm vmshell "cd /boot/home/haikuports && \
                 source \"$recipe\" && \
@@ -302,13 +282,6 @@ jobs:
           echo "Provided packages: $COLLECTED_PROVIDES"
 
           echo "Using HaikuPorter in VM to calculate dependencies..."
-          echo "----"
-          docker exec haiku-vm vmshell "cd /boot/home/haikuports && haikuporter --no-repository-update --list-dependencies $CHANGED_RECIPES" #| grep ">" | cut -d "-" -f 1 | sort -u | xargs echo
-          echo "----"
-          docker exec haiku-vm vmshell "cd /boot/home/haikuports && haikuporter --no-repository-update --list-dependencies $CHANGED_RECIPES" | cut -d "-" -f 1 | sort -u | xargs echo
-          echo "----"
-          docker exec haiku-vm vmshell "cd /boot/home/haikuports && haikuporter --no-repository-update --list-dependencies $CHANGED_RECIPES" | grep ">" | cut -d "-" -f 1 | sort -u | xargs echo
-          echo "----"
           DEPENDENCIES=$(docker exec haiku-vm vmshell "cd /boot/home/haikuports && haikuporter --no-repository-update --list-dependencies $CHANGED_RECIPES" | grep ">" | cut -d "-" -f 1 | sort -u | xargs echo)
           echo "Calculated dependencies: $DEPENDENCIES"
 
