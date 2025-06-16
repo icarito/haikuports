@@ -140,8 +140,7 @@ jobs:
           mkdir -p changed_ports_temp
           
           for recipe in $CHANGED_RECIPES; do
-            cp -ar */"$recipe"/patches changed_ports_temp/ || true 
-            cp -ar */"$recipe"/*.recipe changed_ports_temp/
+            cp -ar */"$recipe" changed_ports_temp/
           done
           
           if [ -d "changed_ports_temp" ] && [ "$(ls -A changed_ports_temp)" ]; then
