@@ -242,7 +242,7 @@ jobs:
             gcc binutils make cmake autoconf automake \
             bison flex gawk gettext git gmp gperf grep \
             libtool m4 nasm ncurses6 patch pkgconf \
-            python3.10 sed tar xz_utils zlib zlib_devel \
+            python3.10 sed tar zlib zlib_devel \
             curl curl_devel openssl3 openssl3_devel \
             glib2 glib2_devel gtk3 gtk3_devel cairo1.18 cairo1.18_devel \
             fontconfig fontconfig_devel freetype freetype_devel \
@@ -255,7 +255,7 @@ jobs:
             bash coreutils diffutils findutils gzip file \
             which unzip zip bc less vim nano pip_python310 jq haikuporter \
             json_glib_devel json_glib wayland_protocols gtk_doc \
-            zstd_devel zstd
+            zstd_devel zstd xz_utils_devel xz_utils
 
       - name: Transfer changed ports to VM
         run: |
