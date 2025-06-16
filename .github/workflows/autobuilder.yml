@@ -238,24 +238,10 @@ jobs:
 
       - name: Install build dependencies and compilation tools in VM
         run: |
+          echo "Installing basic build tools in VM (dependencies will be calculated later)..."
           docker exec haiku-vm vmshell pkgman install -y \
-            gcc binutils make cmake autoconf automake \
-            bison flex gawk gettext git gmp gperf grep \
-            libtool m4 nasm ncurses6 patch pkgconf \
-            python3.10 sed tar zlib zlib_devel \
-            curl curl_devel openssl3 openssl3_devel \
-            glib2 glib2_devel gtk3 gtk3_devel cairo1.18 cairo1.18_devel \
-            fontconfig fontconfig_devel freetype freetype_devel \
-            harfbuzz harfbuzz_devel pango pango_devel \
-            expat libffi libffi_devel libxml2 libxml2_devel \
-            libxslt libpcre libpcre_devel libpng16 libpng16_devel \
-            libjpeg_turbo libjpeg_turbo_devel tiff tiff_devel \
-            libarchive libarchive_devel bzip2 bzip2_devel \
-            libyaml libyaml_devel jsoncpp meson ninja \
-            bash coreutils diffutils findutils gzip file \
-            which unzip zip bc less vim nano pip_python310 jq haikuporter \
-            json_glib_devel json_glib wayland_protocols gtk_doc \
-            zstd_devel zstd xz_utils_devel xz_utils
+            gcc binutils make cmake haikuporter
+          echo "Basic build tools installation completed."
 
       - name: Transfer changed ports to VM
         run: |
@@ -295,6 +281,49 @@ jobs:
             echo "✗ repository directory not found on runner. No .DependencyInfo files to transfer."
             docker exec haiku-vm vmshell "mkdir -p /boot/home/haikuports/repository" # Ensure dir exists
           fi
+
+      - name: Calculate and install build dependencies in VM
+        run: |
+          echo "Calculating build dependencies for changed recipes in VM..."
+          CHANGED_RECIPES='${{ needs.prepare-build.outputs.changed_recipes_space_separated }}'
+          echo "Changed recipes: $CHANGED_RECIPES"
+          
+          echo "Using HaikuPorter in VM to calculate dependencies..."
+          DEPENDENCIES=$(docker exec haiku-vm vmshell "cd /boot/home/haikuports && haikuporter --no-repository-update --list-dependencies $CHANGED_RECIPES" | grep ">" | cut -d "-" -f 1 | sort -u | xargs echo)
+
+          # Usamos un array asociativo para almacenar la última versión de cada paquete
+          declare -A latest_packages
+
+          for pkg in $DEPENDENCIES; do
+              # Extraemos el nombre base del paquete (ej. "icu" de "icu74_devel")
+              base_name=$(echo "$pkg" | sed -E 's/[0-9._-]+.*//')
+              
+              # Si ya tenemos una entrada para este paquete base y la versión actual es más antigua, la saltamos
+              if [[ -n "${latest_packages[$base_name]}" && "${latest_packages[$base_name]}" > "$pkg" ]]; then
+                  continue
+              fi
+              
+              # Almacenamos la versión actual como la más reciente
+              latest_packages["$base_name"]="$pkg"
+          done
+
+          DEPENDENCIES=$(for pkg in "${latest_packages[@]}"; do
+              echo "$pkg"
+          done | sort)
+          
+          #if [ -z "$DEPENDENCIES" ]; then
+          #  echo "No specific dependencies found, using minimal base set"
+          #  DEPENDENCIES="autoconf automake bison flex gawk gettext git gmp gperf grep libtool m4 nasm patch pkgconf python3.10 sed tar"
+          #else
+          #  echo "Calculated dependencies: $DEPENDENCIES"
+          #  # Always include some essential build tools that might not be detected
+          #  DEPENDENCIES="autoconf automake bison flex gawk gettext git gmp gperf grep libtool m4 nasm patch pkgconf python3.10 sed tar $DEPENDENCIES"
+          #fi
+          
+          echo "Final dependency list: $DEPENDENCIES"
+          echo "Installing calculated dependencies in VM..."
+          docker exec haiku-vm vmshell pkgman install -y $DEPENDENCIES
+          echo "Dependencies installation completed."
 
       - name: Build modified packages with haikuporter
         id: build-packages
