@@ -13,7 +13,8 @@ jobs:
     outputs:
       changed_recipes_space_separated: ${{ steps.detect-changes.outputs.changed_recipes_space_separated }}
       has_changed_recipes: ${{ steps.detect-changes.outputs.has_changed_recipes }}
-      master_sha: ${{ steps.get-master-ref.outputs.master_sha }}
+      current_sha: ${{ steps.get-current-ref.outputs.current_sha }}
+      master_sha: ${{ steps.get-current-ref.outputs.master_sha }}
     steps:
       - name: Checkout HaikuPorts repository
         uses: actions/checkout@v4
@@ -95,21 +96,15 @@ jobs:
           fi
         shell: bash
 
-      - name: Update Repository and Stage Dependency Infos
-        id: generate-deps
-        if: steps.detect-changes.outputs.has_changed_recipes == 'true'
+      - name: Get current commit for cache key
+        id: get-current-ref
         run: |
-          echo "Updating HaikuPorter repository to generate/update all .DependencyInfo files..."
-          # Dynamically find the unzipped license directory name relative to workspace
-          LICENSES_DIR_NAME=$(ls -d ${{ github.workspace }}/haiku-licenses-*/ | head -n 1 | xargs basename)
-          echo "Using licenses directory: $LICENSES_DIR_NAME at ${{ github.workspace }}/$LICENSES_DIR_NAME"
-
-          haikuporter -q --config="${{ github.workspace }}/haikuports.conf"                     --licenses="${{ github.workspace }}/$LICENSES_DIR_NAME" --repository-update
-        shell: bash
-        
-      - name: Get master branch commit for cache key
-        id: get-master-ref
-        run: |
+          # Use current commit SHA for cache key to ensure fresh DependencyInfo generation
+          CURRENT_SHA=${{ github.sha }}
+          echo "current_sha=$CURRENT_SHA" >> $GITHUB_OUTPUT
+          echo "Using current commit SHA for cache key: $CURRENT_SHA"
+          
+          # Also get master SHA for fallback cache restore if needed
           if git rev-parse --verify origin/main >/dev/null 2>&1; then
             MASTER_SHA=$(git rev-parse origin/main)
           elif git rev-parse --verify origin/master >/dev/null 2>&1; then
@@ -118,16 +113,67 @@ jobs:
             MASTER_SHA=${{ github.sha }}
           fi
           echo "master_sha=$MASTER_SHA" >> $GITHUB_OUTPUT
-          echo "Using master SHA for cache key: $MASTER_SHA"
+          echo "Master SHA for fallback: $MASTER_SHA"
         shell: bash
 
-      - name: Cache .DependencyInfo files
+      - name: Update Repository and Stage Dependency Infos
+        id: generate-deps
+        if: steps.detect-changes.outputs.has_changed_recipes == 'true'
+        run: |
+          echo "Updating HaikuPorter repository to generate/update all .DependencyInfo files..."
+          echo "Working on commit: ${{ steps.get-current-ref.outputs.current_sha }}"
+          git log --oneline -n 3
+          
+          # Dynamically find the unzipped license directory name relative to workspace
+          LICENSES_DIR_NAME=$(ls -d ${{ github.workspace }}/haiku-licenses-*/ | head -n 1 | xargs basename)
+          echo "Using licenses directory: $LICENSES_DIR_NAME at ${{ github.workspace }}/$LICENSES_DIR_NAME"
+
+          echo "Generating .DependencyInfo files for current commit state..."
+          haikuporter -q --config="${{ github.workspace }}/haikuports.conf" --licenses="${{ github.workspace }}/$LICENSES_DIR_NAME" --repository-update
+          
+          echo "Repository update completed. Generated .DependencyInfo files:"
+        shell: bash
+
+      - name: Package changed ports
+        id: package-ports
+        if: steps.detect-changes.outputs.has_changed_recipes == 'true'
+        run: |
+          echo "Packaging changed ports directories..."
+          CHANGED_RECIPES='${{ steps.detect-changes.outputs.changed_recipes_space_separated }}'
+          echo "Changed recipes: $CHANGED_RECIPES"
+          
+          # Create a temporary directory to collect the changed ports
+          mkdir -p changed_ports_temp
+          
+          for recipe in $CHANGED_RECIPES; do
+            cp -ar */"$recipe" changed_ports_temp/
+          done
+          
+          # Create the tar.gz file
+          if [ -d "changed_ports_temp" ] && [ "$(ls -A changed_ports_temp)" ]; then
+            tar -czf changed_ports.tar.gz -C changed_ports_temp .
+            echo "Created changed_ports.tar.gz with contents:"
+            tar -tzf changed_ports.tar.gz | head -n 20
+          else
+            echo "No port directories found to package"
+            tar -czf changed_ports.tar.gz --files-from /dev/null
+          fi
+          
+          # Clean up temp directory
+          rm -rf changed_ports_temp
+        shell: bash
+
+      - name: Cache .DependencyInfo files and changed ports
         id: cache-deps
         uses: actions/cache@v4
         with:
           path: |
             repository/*
-          key: ${{ runner.os }}-haiku-deps-${{ steps.get-master-ref.outputs.master_sha }}
+            changed_ports.tar.gz
+          key: ${{ runner.os }}-haiku-deps-${{ steps.get-current-ref.outputs.current_sha }}
+          restore-keys: |
+            ${{ runner.os }}-haiku-deps-${{ steps.get-current-ref.outputs.master_sha }}
+            ${{ runner.os }}-haiku-deps-
 
   build-haikuports: 
     runs-on: ubuntu-latest
@@ -135,19 +181,24 @@ jobs:
     if: needs.prepare-build.outputs.has_changed_recipes == 'true'
 
     steps:
-      - name: Restore cached DependencyInfo files
+      - name: Restore cached DependencyInfo files and changed ports
         id: restore-cache
         uses: actions/cache/restore@v4
         with:
           path: |
             repository/*
-          key: ${{ runner.os }}-haiku-deps-${{ needs.prepare-build.outputs.master_sha }}
+            changed_ports.tar.gz
+          key: ${{ runner.os }}-haiku-deps-${{ needs.prepare-build.outputs.current_sha }}
+          restore-keys: |
+            ${{ runner.os }}-haiku-deps-${{ needs.prepare-build.outputs.master_sha }}
+            ${{ runner.os }}-haiku-deps-
 
       - name: Debug cache restore results
         run: |
           echo "=== DEBUG: Cache restore results ==="
           echo "Cache hit result: ${{ steps.restore-cache.outputs.cache-hit }}"
-          echo "Cache key used: ${{ runner.os }}-haiku-deps-${{ needs.prepare-build.outputs.master_sha }}"
+          echo "Cache key used: ${{ runner.os }}-haiku-deps-${{ needs.prepare-build.outputs.current_sha }}"
+          echo "Current SHA from prepare-build: ${{ needs.prepare-build.outputs.current_sha }}"
           echo "Master SHA from prepare-build: ${{ needs.prepare-build.outputs.master_sha }}"
           echo "Files in current directory:"
           ls -la
@@ -158,6 +209,15 @@ jobs:
             ls -la repository/ | head -n 10
           else
             echo "✗ repository directory NOT found"
+          fi
+          echo "Looking for changed_ports.tar.gz:"
+          if [ -f "changed_ports.tar.gz" ]; then
+            echo "✓ changed_ports.tar.gz found"
+            echo "Size: $(du -h changed_ports.tar.gz | cut -f1)"
+            echo "Contents preview:"
+            tar -tzf changed_ports.tar.gz | head -n 10
+          else
+            echo "✗ changed_ports.tar.gz NOT found"
           fi
 
       - name: Start Haiku VM container
@@ -187,7 +247,6 @@ jobs:
             glib2 glib2_devel gtk3 gtk3_devel cairo1.18 cairo1.18_devel \
             fontconfig fontconfig_devel freetype freetype_devel \
             harfbuzz harfbuzz_devel pango pango_devel \
-            gobject_introspection gobject_introspection_devel \
             expat libffi libffi_devel libxml2 libxml2_devel \
             libxslt libpcre libpcre_devel libpng16 libpng16_devel \
             libjpeg_turbo libjpeg_turbo_devel tiff tiff_devel \
@@ -196,17 +255,24 @@ jobs:
             bash coreutils diffutils findutils gzip file \
             which unzip zip bc less vim nano pip_python310 jq haikuporter \
             json_glib_devel json_glib wayland_protocols gtk_doc \
-            zstd_devel zstd xz_utils xz_utils_devel
+            zstd_devel zstd
 
-      - name: Checkout HaikuPorts repository in VM
+      - name: Transfer changed ports to VM
         run: |
-          docker exec haiku-vm vmshell "mkdir -p /boot/home/haikuports && \
-            git clone https://github.com/${GITHUB_REPOSITORY}.git /boot/home/haikuports && \
-            cd /boot/home/haikuports && \
-            echo \"Attempting to fetch GITHUB_REF: ${GITHUB_REF}\" && \
-            git fetch origin \"${GITHUB_REF}:${GITHUB_REF}\" && \
-            echo \"Successfully fetched GITHUB_REF. Attempting checkout of GITHUB_SHA: ${GITHUB_SHA}\" && \
-            git checkout \"${GITHUB_SHA}\""
+          echo "Creating base haikuports directory structure in VM..."
+          docker exec haiku-vm vmshell "mkdir -p /boot/home/haikuports"
+          
+          if [ -f "changed_ports.tar.gz" ]; then
+            echo "Transferring changed_ports.tar.gz to VM..."
+            cat changed_ports.tar.gz | docker exec -i haiku-vm vmshell "cat > /boot/home/haikuports/changed_ports.tar.gz"
+            echo "Extracting changed ports in VM..."
+            docker exec haiku-vm vmshell "cd /boot/home/haikuports && tar -xzf changed_ports.tar.gz"
+            echo "Transferred and extracted changed ports to /boot/home/haikuports in VM."
+            docker exec haiku-vm vmshell "echo 'Contents of /boot/home/haikuports:'; ls -la /boot/home/haikuports"
+          else
+            echo "✗ changed_ports.tar.gz not found on runner. Cannot transfer ports."
+            exit 1
+          fi
 
       - name: Setup HaikuPorter and place .DependencyInfo files in VM
         run: |
@@ -214,13 +280,9 @@ jobs:
           docker exec haiku-vm vmshell "echo 'TREE_PATH=\"/boot/home/haikuports\"' > /boot/home/config/settings/haikuports.conf"
           docker exec haiku-vm vmshell "echo 'PACKAGER=\"GitHub Actions Builder <actions@github.com>\"' >> /boot/home/config/settings/haikuports.conf"
           docker exec haiku-vm vmshell "echo 'TARGET_ARCHITECTURE=\"x86_64\"' >> /boot/home/config/settings/haikuports.conf"
+          docker exec haiku-vm vmshell "echo 'RecipeFormatVersion=1' > ~/haikuports/FormatVersions"
 
-          echo "--- Transferring cached files to VM ---"
-          echo "Creating changed_recipes_list.txt in VM from needs context..."
-          echo '${{ needs.prepare-build.outputs.changed_recipes_space_separated }}' | docker exec -i haiku-vm vmshell "mkdir -p /boot/home/haikuports && cat > /boot/home/haikuports/changed_recipes_list.txt"
-          echo "Transferred changed_recipes_list.txt to VM using needs context."
-          docker exec -i haiku-vm vmshell "echo 'Content of changed_recipes_list.txt in VM:'; cat /boot/home/haikuports/changed_recipes_list.txt"
-
+          echo "--- Transferring cached dependency files to VM ---"
           if [ -d "repository" ]; then
             echo "Creating dependency-infos.tar.gz on runner..."
             tar -czf dependency-infos.tar.gz -C repository .
@@ -235,23 +297,18 @@ jobs:
           fi
 
       - name: Build modified packages with haikuporter
+        id: build-packages
         run: |
-          echo "=== DEBUG: Checking files in VM before build ==="
           docker exec haiku-vm vmshell "cd /boot/home/haikuports && \
             echo 'Reading list of changed packages' && \
             RECIPE_ARGS='${{ needs.prepare-build.outputs.changed_recipes_space_separated }}' && \
-            \
-            if [ -z \"$RECIPE_ARGS\" ]; then \
-              echo 'No packages specified to build.' ; \
+            echo \"Changed packages: \$RECIPE_ARGS\" && \
+            if haikuporter \$RECIPE_ARGS -j4 --no-repository-update; then \
+              echo \"✓ HaikuPorter build completed successfully.\" ; \
             else \
-              echo \"Building packages: $RECIPE_ARGS\" ; \
-              if haikuporter $RECIPE_ARGS -S -j4 --no-repository-update; then \
-                echo \"✓ HaikuPorter build completed successfully.\" ; \
-              else \
-                BUILD_FAILURE_CODE=$? ; \
-                echo \"✗ HaikuPorter build failed with exit code $BUILD_FAILURE_CODE.\" ; \
-                exit $BUILD_FAILURE_CODE ; \
-              fi ; \
+              BUILD_FAILURE_CODE=$? ; \
+              echo \"✗ HaikuPorter build failed with exit code $BUILD_FAILURE_CODE.\" ; \
+              exit $BUILD_FAILURE_CODE ; \
             fi ; \
             \
             echo \"Build summary:\" ; \
@@ -265,7 +322,6 @@ jobs:
             fi"
 
       - name: Collect build artifacts
-        if: always()
         run: |
           mkdir -p build-artifacts
           docker exec haiku-vm vmshell "cd /boot/home/haikuports && \
