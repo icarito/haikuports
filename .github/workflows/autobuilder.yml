@@ -165,7 +165,7 @@ jobs:
             changed_ports.tar.gz
           key: ${{ runner.os }}-haiku-deps-${{ steps.get-current-ref.outputs.current_sha }}
           restore-keys: |
-            ${{ runner.os }}-haiku-deps-${{ steps.get-current-ref.outputs.master_sha }}
+            ${{ runner.os }}-haiku-deps-${{ steps.get-current-ref.outputs.current_sha }}
             ${{ runner.os }}-haiku-deps-
 
   build-haikuports: 
@@ -183,7 +183,7 @@ jobs:
             changed_ports.tar.gz
           key: ${{ runner.os }}-haiku-deps-${{ needs.prepare-build.outputs.current_sha }}
           restore-keys: |
-            ${{ runner.os }}-haiku-deps-${{ needs.prepare-build.outputs.master_sha }}
+            ${{ runner.os }}-haiku-deps-${{ needs.prepare-build.outputs.current_sha}}
             ${{ runner.os }}-haiku-deps-
 
       - name: Debug cache restore results
@@ -192,7 +192,6 @@ jobs:
           echo "Cache hit result: ${{ steps.restore-cache.outputs.cache-hit }}"
           echo "Cache key used: ${{ runner.os }}-haiku-deps-${{ needs.prepare-build.outputs.current_sha }}"
           echo "Current SHA from prepare-build: ${{ needs.prepare-build.outputs.current_sha }}"
-          echo "Master SHA from prepare-build: ${{ needs.prepare-build.outputs.master_sha }}"
           echo "Files in current directory:"
           ls -la
           echo "Looking for repository directory:"
