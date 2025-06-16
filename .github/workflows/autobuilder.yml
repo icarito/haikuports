@@ -3,9 +3,9 @@ name: Build HaikuPorts packages
 on:
   workflow_dispatch:
   push:
-    branches: [ main, master, development ] # Adjust as per your repository's default branches
+    branches: [ main, master, development ]
   pull_request:
-    branches: [ main, master, development ] # Adjust as per your repository's default branches
+    branches: [ main, master, development ]
 
 jobs:
   prepare-build:
@@ -48,7 +48,7 @@ jobs:
           wget https://github.com/waddlesplash/haiku-licenses/archive/master.zip -O haiku-licenses.zip
           unzip -q haiku-licenses.zip
           echo "Haiku Licenses downloaded and unzipped. Found directories:"
-          ls -d ${{ github.workspace }}/haiku-licenses-*/ # Verify directory name relative to workspace
+          ls -d ${{ github.workspace }}/haiku-licenses-*/
         shell: bash
 
       - name: Detect modified recipes
@@ -64,7 +64,6 @@ jobs:
 
           if [ -z "$GIT_PRIMARY_BRANCH_REF" ]; then
             echo "::warning::No main or master branch found at origin to compare against. Assuming all recipes need checking."
-            # Get the directory name (package name) for all recipes
             CHANGED_RECIPES=$(find . -name '*.recipe' -printf '%h\n' | sed 's|^\./||' | cut -d "/" -f 2 | sort -u | tr '\n' ' ')
             echo "build_all_flag=true" >> $GITHUB_OUTPUT 
           else
@@ -81,7 +80,6 @@ jobs:
             fi
             echo "build_all_flag=false" >> $GITHUB_OUTPUT
           fi
-          # Remove trailing space if any
           CHANGED_RECIPES=$(echo "$CHANGED_RECIPES" | sed 's/ *$//')
 
           if [ -z "$CHANGED_RECIPES" ]; then
@@ -99,12 +97,10 @@ jobs:
       - name: Get current commit for cache key
         id: get-current-ref
         run: |
-          # Use current commit SHA for cache key to ensure fresh DependencyInfo generation
           CURRENT_SHA=${{ github.sha }}
           echo "current_sha=$CURRENT_SHA" >> $GITHUB_OUTPUT
           echo "Using current commit SHA for cache key: $CURRENT_SHA"
           
-          # Also get master SHA for fallback cache restore if needed
           if git rev-parse --verify origin/main >/dev/null 2>&1; then
             MASTER_SHA=$(git rev-parse origin/main)
           elif git rev-parse --verify origin/master >/dev/null 2>&1; then
@@ -124,7 +120,6 @@ jobs:
           echo "Working on commit: ${{ steps.get-current-ref.outputs.current_sha }}"
           git log --oneline -n 3
           
-          # Dynamically find the unzipped license directory name relative to workspace
           LICENSES_DIR_NAME=$(ls -d ${{ github.workspace }}/haiku-licenses-*/ | head -n 1 | xargs basename)
           echo "Using licenses directory: $LICENSES_DIR_NAME at ${{ github.workspace }}/$LICENSES_DIR_NAME"
 
@@ -142,14 +137,12 @@ jobs:
           CHANGED_RECIPES='${{ steps.detect-changes.outputs.changed_recipes_space_separated }}'
           echo "Changed recipes: $CHANGED_RECIPES"
           
-          # Create a temporary directory to collect the changed ports
           mkdir -p changed_ports_temp
           
           for recipe in $CHANGED_RECIPES; do
             cp -ar */"$recipe" changed_ports_temp/
           done
           
-          # Create the tar.gz file
           if [ -d "changed_ports_temp" ] && [ "$(ls -A changed_ports_temp)" ]; then
             tar -czf changed_ports.tar.gz -C changed_ports_temp .
             echo "Created changed_ports.tar.gz with contents:"
@@ -159,7 +152,6 @@ jobs:
             tar -czf changed_ports.tar.gz --files-from /dev/null
           fi
           
-          # Clean up temp directory
           rm -rf changed_ports_temp
         shell: bash
 
@@ -232,7 +224,6 @@ jobs:
             docker.io/hectorm/qemu-haiku:latest
           
           echo "Waiting for container to be ready..."
-          # Wait for container to be ready
           timeout 600 docker exec haiku-vm sh -c 'container-init & timeout 600 vmshell exit 0'
           echo "Container should be ready."
 
@@ -279,7 +270,7 @@ jobs:
             docker exec haiku-vm vmshell "echo 'Contents of /boot/home/haikuports/repository:'; ls -la /boot/home/haikuports/repository"
           else
             echo "✗ repository directory not found on runner. No .DependencyInfo files to transfer."
-            docker exec haiku-vm vmshell "mkdir -p /boot/home/haikuports/repository" # Ensure dir exists
+            docker exec haiku-vm vmshell "mkdir -p /boot/home/haikuports/repository"
           fi
 
       - name: Calculate and install build dependencies in VM
@@ -291,34 +282,21 @@ jobs:
           echo "Using HaikuPorter in VM to calculate dependencies..."
           DEPENDENCIES=$(docker exec haiku-vm vmshell "cd /boot/home/haikuports && haikuporter --no-repository-update --list-dependencies $CHANGED_RECIPES" | grep ">" | cut -d "-" -f 1 | sort -u | xargs echo)
 
-          # Usamos un array asociativo para almacenar la última versión de cada paquete
           declare -A latest_packages
 
           for pkg in $DEPENDENCIES; do
-              # Extraemos el nombre base del paquete (ej. "icu" de "icu74_devel")
               base_name=$(echo "$pkg" | sed -E 's/[0-9._-]+.*//')
               
-              # Si ya tenemos una entrada para este paquete base y la versión actual es más antigua, la saltamos
               if [[ -n "${latest_packages[$base_name]}" && "${latest_packages[$base_name]}" > "$pkg" ]]; then
                   continue
               fi
               
-              # Almacenamos la versión actual como la más reciente
               latest_packages["$base_name"]="$pkg"
           done
 
           DEPENDENCIES=$(for pkg in "${latest_packages[@]}"; do
               echo "$pkg"
           done | sort)
-          
-          #if [ -z "$DEPENDENCIES" ]; then
-          #  echo "No specific dependencies found, using minimal base set"
-          #  DEPENDENCIES="autoconf automake bison flex gawk gettext git gmp gperf grep libtool m4 nasm patch pkgconf python3.10 sed tar"
-          #else
-          #  echo "Calculated dependencies: $DEPENDENCIES"
-          #  # Always include some essential build tools that might not be detected
-          #  DEPENDENCIES="autoconf automake bison flex gawk gettext git gmp gperf grep libtool m4 nasm patch pkgconf python3.10 sed tar $DEPENDENCIES"
-          #fi
           
           echo "Final dependency list: $DEPENDENCIES"
           echo "Installing calculated dependencies in VM..."
