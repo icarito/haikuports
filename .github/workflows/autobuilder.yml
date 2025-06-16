@@ -261,25 +261,31 @@ jobs:
           # For each $CHANGED_RECIPE, get what it provides
 
           # Read PROVIDES fields from each new recipe
-          COLLECTED_PROVIDES=""
+          COLLECTED_PROVIDES_RAW_ITEMS=() # Use a bash array to store raw items
           # For recipe file in changed_ports.tar.gz, source the recipe and collect PROVIDES
-          for recipe in $(tar -tzf changed_ports.tar.gz | grep '\.recipe$' | grep -v 'work'); do
-              echo "Processing recipe: $recipe"
-              COLLECTED_PROVIDES+=$(docker exec haiku-vm vmshell "cd /boot/home/haikuports && \
-                source \"$recipe\" && \
-                for item in \$PROVIDES_devel; do echo \$item; done | grep -v '^[0-9].*' | grep -v compat | grep -v '='" | xargs echo)
-              COLLECTED_PROVIDES+=" "
-              COLLECTED_PROVIDES+=$(docker exec haiku-vm vmshell "cd /boot/home/haikuports && \
-                source \"$recipe\" && \
-                for item in \$PROVIDES; do echo \$item; done | grep -v '^[0-9].*' | grep -v compat | grep -v '='" | xargs echo)
-              #COLLECTED_PROVIDES+=$(docker exec haiku-vm vmshell "cd /boot/home/haikuports && \
-              #  source \"$recipe\" && \
-              #  for item in \$PROVIDES_devel; do echo \$item; done") | grep -v "^[0-9].*" | grep -v compat | grep -v "=" | grep ">" | cut -d "-" -f 1 | sort -u | xargs echo
-              #COLLECTED_PROVIDES+=$(docker exec haiku-vm vmshell "cd /boot/home/haikuports && \
-              #  source \"$recipe\" && \
-              #  for item in \$PROVIDES; do echo \$item; done") | grep -v "^[0-9].*" | grep -v compat | grep -v "="
+          for recipe_path_in_tar in $(tar -tzf changed_ports.tar.gz | grep '\.recipe$' | grep -v 'work'); do
+              echo "Processing recipe for PROVIDES: $recipe_path_in_tar"
+              
+              # Get PROVIDES_devel items
+              current_provides_devel=$(docker exec haiku-vm vmshell "cd /boot/home/haikuports && \
+                source \"$recipe_path_in_tar\" && \
+                for item in \$PROVIDES_devel; do echo \"\$item\"; done")
+              while IFS= read -r line; do [ -n "$line" ] && COLLECTED_PROVIDES_RAW_ITEMS+=("$line"); done <<< "$current_provides_devel"
+
+              # Get PROVIDES items
+              current_provides=$(docker exec haiku-vm vmshell "cd /boot/home/haikuports && \
+                source \"$recipe_path_in_tar\" && \
+                for item in \$PROVIDES; do echo \"\$item\"; done")
+              while IFS= read -r line; do [ -n "$line" ] && COLLECTED_PROVIDES_RAW_ITEMS+=("$line"); done <<< "$current_provides"
           done
-          echo "Provided packages: $COLLECTED_PROVIDES"
+          echo "Collected raw provided items (one per line):"
+          printf "'%s'\n" "${COLLECTED_PROVIDES_RAW_ITEMS[@]}"
+
+          # This variable is used by the existing filter logic, but we'll iterate over the array directly.
+          # For debugging or if other parts rely on this string format:
+          _COLLECTED_PROVIDES_DEBUG_STRING=$(printf "%s " "${COLLECTED_PROVIDES_RAW_ITEMS[@]}" | sed 's/ *$//')
+          echo "Provided packages (debug string): $_COLLECTED_PROVIDES_DEBUG_STRING"
+
 
           echo "Using HaikuPorter in VM to calculate dependencies..."
           DEPENDENCIES=$(docker exec haiku-vm vmshell "cd /boot/home/haikuports && haikuporter --no-repository-update --list-dependencies $CHANGED_RECIPES" | grep ">" | cut -d "-" -f 1 | sort -u | xargs echo)
@@ -290,11 +296,11 @@ jobs:
 
           # Convert space-separated strings to arrays for robust iteration
           read -r -a dependencies_array <<< "$DEPENDENCIES"
-          read -r -a collected_provides_array <<< "$COLLECTED_PROVIDES"
+          # We will use COLLECTED_PROVIDES_RAW_ITEMS directly instead of parsing a string back into an array
 
           echo "--- Debug: Dependencies before filtering ---"
           echo "Dependencies array: (${dependencies_array[*]})"
-          echo "Collected provides array: (${collected_provides_array[*]})"
+          # The raw items were printed above.
 
           for dep in "${dependencies_array[@]}"; do
               if [ -z "$dep" ]; then # Skip empty elements, if any
@@ -302,15 +308,16 @@ jobs:
               fi
 
               is_provided_by_current_build=false
-              for provided_item_raw in "${collected_provides_array[@]}"; do
+              for provided_item_raw in "${COLLECTED_PROVIDES_RAW_ITEMS[@]}"; do # Iterate over the raw items array
                   if [ -z "$provided_item_raw" ]; then # Skip empty elements
                       continue
                   fi
 
-                  # Normalize the raw provided item by stripping common HaikuPorter prefixes
-                  # to get an effective package name.
-                  effective_provided_name="$provided_item_raw"
-                  if [[ "$effective_provided_name" == devel:* ]]; then
+                  # Normalize the raw provided item:
+                  # 1. Get the name part (before any space, to remove " = version", " compat >= X", etc.)
+                  effective_provided_name="${provided_item_raw%% *}"
+                  # 2. Strip common HaikuPorter prefixes
+                  if [[ "$effective_provided_name" == devel:* ]]; then # Must be elif
                       effective_provided_name="${effective_provided_name#devel:}"
                   elif [[ "$effective_provided_name" == lib:* ]]; then
                       effective_provided_name="${effective_provided_name#lib:}"
