@@ -280,28 +280,50 @@ jobs:
           echo "Changed recipes: $CHANGED_RECIPES"
           
           echo "Using HaikuPorter in VM to calculate dependencies..."
-          DEPENDENCIES=$(docker exec haiku-vm vmshell "cd /boot/home/haikuports && haikuporter --no-repository-update --list-dependencies $CHANGED_RECIPES" | grep ">" | cut -d "-" -f 1 | sort -u | xargs echo)
-
-          declare -A latest_packages
-
-          for pkg in $DEPENDENCIES; do
-              base_name=$(echo "$pkg" | sed -E 's/[0-9._-]+.*//')
-              
-              if [[ -n "${latest_packages[$base_name]}" && "${latest_packages[$base_name]}" > "$pkg" ]]; then
-                  continue
-              fi
-              
-              latest_packages["$base_name"]="$pkg"
-          done
-
-          DEPENDENCIES=$(for pkg in "${latest_packages[@]}"; do
-              echo "$pkg"
-          done | sort)
+          # Get all dependencies first
+          ALL_DEPENDENCIES=$(docker exec haiku-vm vmshell "cd /boot/home/haikuports && haikuporter --no-repository-update --list-dependencies $CHANGED_RECIPES" | grep ">" | cut -d "-" -f 1 | sort -u | xargs echo)
           
-          echo "Final dependency list: $DEPENDENCIES"
-          echo "Installing calculated dependencies in VM..."
-          docker exec haiku-vm vmshell pkgman install -y $DEPENDENCIES
-          echo "Dependencies installation completed."
+          if [ -z "$ALL_DEPENDENCIES" ]; then
+            echo "No dependencies found by HaikuPorter, using minimal base set"
+            DEPENDENCIES=""
+          else
+            echo "All dependencies found: $ALL_DEPENDENCIES"
+            
+            # Filter out packages we're building (convert CHANGED_RECIPES to array for filtering)
+            CHANGED_RECIPES_ARRAY=($CHANGED_RECIPES)
+            FILTERED_DEPENDENCIES=""
+            
+            for dep in $ALL_DEPENDENCIES; do
+              # Check if this dependency is in our list of packages being built
+              is_building=false
+              for recipe in "${CHANGED_RECIPES_ARRAY[@]}"; do
+                if [[ "$dep" == "$recipe" ]]; then
+                  echo "Excluding $dep from installation (we're building it)"
+                  is_building=true
+                  break
+                fi
+              done
+              
+              # Only add to filtered list if we're not building it
+              if [[ "$is_building" == false ]]; then
+                FILTERED_DEPENDENCIES="$FILTERED_DEPENDENCIES $dep"
+              fi
+            done
+            
+            # Clean up extra spaces
+            DEPENDENCIES=$(echo "$FILTERED_DEPENDENCIES" | xargs)
+          fi
+          
+          if [ -z "$DEPENDENCIES" ]; then
+            echo "No external dependencies to install (all dependencies are being built or none found)"
+          else
+            echo "Final filtered dependency list: $DEPENDENCIES"
+            echo "Installing calculated dependencies in VM..."
+            docker exec haiku-vm vmshell "pkgman install -y $DEPENDENCIES" || {
+              echo "Warning: Some dependencies failed to install, continuing with build..."
+            }
+          fi
+          echo "Dependencies installation step completed."
 
       - name: Build modified packages with haikuporter
         id: build-packages
