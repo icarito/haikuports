@@ -283,6 +283,18 @@ jobs:
           echo "Using HaikuPorter in VM to calculate dependencies..."
           DEPENDENCIES=$(docker exec haiku-vm vmshell "cd /boot/home/haikuports && haikuporter --no-repository-update --list-dependencies $CHANGED_RECIPES" | grep ">" | cut -d "-" -f 1 | sort -u | xargs echo)
 
+          # Filter $CHANGED_RECIPES out of $DEPENDENCIES
+          declare -A unchanged_dependencies
+          for dep in $DEPENDENCIES; do
+              if [[ ! " $CHANGED_RECIPES " =~ " $dep " ]]; then
+                  unchanged_dependencies["$dep"]=1
+              fi
+          done
+          DEPENDENCIES=$(for dep in "${!unchanged_dependencies[@]}"; do
+              echo "$dep"
+          done | sort)
+          echo "Calculated dependencies: $DEPENDENCIES"
+
           declare -A latest_packages
 
           for pkg in $DEPENDENCIES; do
