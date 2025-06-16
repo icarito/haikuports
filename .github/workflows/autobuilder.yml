@@ -13,8 +13,6 @@ jobs:
     outputs:
       changed_recipes_space_separated: ${{ steps.detect-changes.outputs.changed_recipes_space_separated }}
       has_changed_recipes: ${{ steps.detect-changes.outputs.has_changed_recipes }}
-      current_sha: ${{ steps.get-current-ref.outputs.current_sha }}
-      master_sha: ${{ steps.get-current-ref.outputs.master_sha }}
     steps:
       - name: Checkout HaikuPorts repository
         uses: actions/checkout@v4
@@ -94,30 +92,12 @@ jobs:
           fi
         shell: bash
 
-      - name: Get current commit for cache key
-        id: get-current-ref
-        run: |
-          CURRENT_SHA=${{ github.sha }}
-          echo "current_sha=$CURRENT_SHA" >> $GITHUB_OUTPUT
-          echo "Using current commit SHA for cache key: $CURRENT_SHA"
-          
-          if git rev-parse --verify origin/main >/dev/null 2>&1; then
-            MASTER_SHA=$(git rev-parse origin/main)
-          elif git rev-parse --verify origin/master >/dev/null 2>&1; then
-            MASTER_SHA=$(git rev-parse origin/master)
-          else
-            MASTER_SHA=${{ github.sha }}
-          fi
-          echo "master_sha=$MASTER_SHA" >> $GITHUB_OUTPUT
-          echo "Master SHA for fallback: $MASTER_SHA"
-        shell: bash
-
       - name: Update Repository and Stage Dependency Infos
         id: generate-deps
         if: steps.detect-changes.outputs.has_changed_recipes == 'true'
         run: |
           echo "Updating HaikuPorter repository to generate/update all .DependencyInfo files..."
-          echo "Working on commit: ${{ steps.get-current-ref.outputs.current_sha }}"
+          echo "Working on commit: ${{ github.sha }}"
           git log --oneline -n 3
           
           LICENSES_DIR_NAME=$(ls -d ${{ github.workspace }}/haiku-licenses-*/ | head -n 1 | xargs basename)
@@ -162,9 +142,9 @@ jobs:
           path: |
             repository/*
             changed_ports.tar.gz
-          key: ${{ runner.os }}-haiku-deps-${{ steps.get-current-ref.outputs.current_sha }}
+          key: ${{ runner.os }}-haiku-deps-${{ github.sha }}
           restore-keys: |
-            ${{ runner.os }}-haiku-deps-${{ steps.get-current-ref.outputs.master_sha }}
+            ${{ runner.os }}-haiku-deps-${{ github.sha }}
             ${{ runner.os }}-haiku-deps-
 
   build-haikuports: 
@@ -180,18 +160,16 @@ jobs:
           path: |
             repository/*
             changed_ports.tar.gz
-          key: ${{ runner.os }}-haiku-deps-${{ needs.prepare-build.outputs.current_sha }}
+          key: ${{ runner.os }}-haiku-deps-${{ github.sha }}
           restore-keys: |
-            ${{ runner.os }}-haiku-deps-${{ needs.prepare-build.outputs.master_sha }}
+            ${{ runner.os }}-haiku-deps-${{ github.sha }}
             ${{ runner.os }}-haiku-deps-
 
       - name: Debug cache restore results
         run: |
           echo "=== DEBUG: Cache restore results ==="
           echo "Cache hit result: ${{ steps.restore-cache.outputs.cache-hit }}"
-          echo "Cache key used: ${{ runner.os }}-haiku-deps-${{ needs.prepare-build.outputs.current_sha }}"
-          echo "Current SHA from prepare-build: ${{ needs.prepare-build.outputs.current_sha }}"
-          echo "Master SHA from prepare-build: ${{ needs.prepare-build.outputs.master_sha }}"
+          echo "Cache key used: ${{ runner.os }}-haiku-deps-${{ github.sha }}"
           echo "Files in current directory:"
           ls -la
           echo "Looking for repository directory:"
@@ -289,7 +267,7 @@ jobs:
           else
             echo "All dependencies found: $ALL_DEPENDENCIES"
             
-              echo "Fetching list of all available packages from HaikuPorter..."
+            echo "Fetching list of all available packages from HaikuPorter..."
             ALL_AVAILABLE_PACKAGES_OUTPUT=$(docker exec haiku-vm vmshell "pkgman search -a | sed s/^........//g | cut -d \" \" -f 1")
             declare -A all_available_packages_map
             while IFS= read -r pkg_name; do
@@ -303,29 +281,18 @@ jobs:
             # For debugging a small sample:
             # echo "Sample of available packages: $(for k in "${!all_available_packages_map[@]}"; do echo "$k"; done | head -n 10 | xargs)"
 
-            # Filter out packages we're building (convert CHANGED_RECIPES to array for filtering)
-            CHANGED_RECIPES_ARRAY=($CHANGED_RECIPES)
-            FILTERED_DEPENDENCIES=""
-            
+            # Filter dependencies not available in ALL_AVAILABLE_PACKAGES_MAP
+            DEPENDENCIES=""
             for dep in $ALL_DEPENDENCIES; do
-              # Check if this dependency is in our list of packages being built
-              is_building=false
-              for recipe in "${ALL_AVAILABLE_PACKAGES_MAP[@]}"; do
-                if [[ "$dep" == "$recipe" ]]; then
-                  echo "Excluding $dep from installation (we're building it)"
-                  is_building=true
-                  break
-                fi
-              done
-              
-              # Only add to filtered list if we're not building it
-              if [[ "$is_building" == false ]]; then
-                FILTERED_DEPENDENCIES="$FILTERED_DEPENDENCIES $dep"
+              # Check if this dependency is available in the map
+              if [[ -n "${all_available_packages_map[$dep]}" ]]; then
+                DEPENDENCIES="$DEPENDENCIES $dep"
+              else
+                echo "Warning: Dependency '$dep' not found in available packages, skipping."
               fi
             done
-            
-            # Clean up extra spaces
-            DEPENDENCIES=$(echo "$FILTERED_DEPENDENCIES" | xargs)
+            DEPENDENCIES=$(echo "$DEPENDENCIES" | xargs)  # Clean up extra spaces
+            echo "Calculated dependencies to install: $DEPENDENCIES"
           fi
           
           if [ -z "$DEPENDENCIES" ]; then
