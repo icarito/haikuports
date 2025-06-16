@@ -258,37 +258,34 @@ jobs:
           CHANGED_RECIPES='${{ needs.prepare-build.outputs.changed_recipes_space_separated }}'
           echo "Changed recipes: $CHANGED_RECIPES"
           
-          # For each $CHANGED_RECIPE, get what it provides
-
-          # Read PROVIDES fields from each new recipe
-          COLLECTED_PROVIDES_RAW_ITEMS=() # Use a bash array to store raw items
-          # For recipe file in changed_ports.tar.gz, source the recipe and collect PROVIDES
-          for recipe_path_in_tar in $(tar -tzf changed_ports.tar.gz | grep '\.recipe$' | grep -v 'work'); do
-              echo "Processing recipe for PROVIDES: $recipe_path_in_tar"
-              
-              # Get PROVIDES_devel items
-              current_provides_devel=$(docker exec haiku-vm vmshell "cd /boot/home/haikuports && \
-                source \"$recipe_path_in_tar\" && \
-                for item in \$PROVIDES_devel; do echo \"\$item\"; done")
-              while IFS= read -r line; do [ -n "$line" ] && COLLECTED_PROVIDES_RAW_ITEMS+=("$line"); done <<< "$current_provides_devel"
-
-              # Get PROVIDES items
-              current_provides=$(docker exec haiku-vm vmshell "cd /boot/home/haikuports && \
-                source \"$recipe_path_in_tar\" && \
-                for item in \$PROVIDES; do echo \"\$item\"; done")
-              while IFS= read -r line; do [ -n "$line" ] && COLLECTED_PROVIDES_RAW_ITEMS+=("$line"); done <<< "$current_provides"
-          done
-          echo "Collected raw provided items (one per line):"
-          printf "'%s'\n" "${COLLECTED_PROVIDES_RAW_ITEMS[@]}"
-
-          # This variable is used by the existing filter logic, but we'll iterate over the array directly.
-          # For debugging or if other parts rely on this string format:
-          _COLLECTED_PROVIDES_DEBUG_STRING=$(printf "%s " "${COLLECTED_PROVIDES_RAW_ITEMS[@]}" | sed 's/ *$//')
-          echo "Provided packages (debug string): $_COLLECTED_PROVIDES_DEBUG_STRING"
-
+          echo "Fetching list of all available packages from HaikuPorter..."
+          ALL_AVAILABLE_PACKAGES_OUTPUT=$(docker exec haiku-vm vmshell "pkgman search -a | sed s/^........//g | cut -d " " -f 1")
+          declare -A all_available_packages_map
+          while IFS= read -r pkg_name; do
+              # Trim whitespace from package name, just in case
+              trimmed_pkg_name=$(echo "$pkg_name" | xargs)
+              if [ -n "$trimmed_pkg_name" ]; then
+                  all_available_packages_map["$trimmed_pkg_name"]=1
+              fi
+          done <<< "$ALL_AVAILABLE_PACKAGES_OUTPUT"
+          echo "Found ${#all_available_packages_map[@]} available packages in repositories."
+          # For debugging a small sample:
+          # echo "Sample of available packages: $(for k in "${!all_available_packages_map[@]}"; do echo "$k"; done | head -n 10 | xargs)"
 
           echo "Using HaikuPorter in VM to calculate dependencies..."
-          DEPENDENCIES=$(docker exec haiku-vm vmshell "cd /boot/home/haikuports && haikuporter --no-repository-update --list-dependencies $CHANGED_RECIPES" | grep ">" | cut -d "-" -f 1 | sort -u | xargs echo)
+          # Get the raw, potentially multi-line output from haikuporter
+          RAW_DEPS_OUTPUT=$(docker exec haiku-vm vmshell "cd /boot/home/haikuports && haikuporter --no-repository-update --list-dependencies $CHANGED_RECIPES")
+          echo "Raw dependencies output from HaikuPorter:"
+          echo "${RAW_DEPS_OUTPUT}"
+          
+          # Process the raw output to extract only the package names that "need to be built"
+          # This collects all such package names from all lines, then uniquifies them.
+          INITIAL_DEPENDENCIES_STRING=$(echo "${RAW_DEPS_OUTPUT}" | \
+            grep "-" | \
+            cut -d "-" -f 1 | \:w
+
+            xargs echo)
+          DEPENDENCIES="$INITIAL_DEPENDENCIES_STRING"
           echo "Calculated dependencies: $DEPENDENCIES"
 
           # Filter $COLLECTED_PROVIDES out of $DEPENDENCIES
@@ -296,45 +293,24 @@ jobs:
 
           # Convert space-separated strings to arrays for robust iteration
           read -r -a dependencies_array <<< "$DEPENDENCIES"
-          # We will use COLLECTED_PROVIDES_RAW_ITEMS directly instead of parsing a string back into an array
 
           echo "--- Debug: Dependencies before filtering ---"
           echo "Dependencies array: (${dependencies_array[*]})"
-          # The raw items were printed above.
 
           for dep in "${dependencies_array[@]}"; do
               if [ -z "$dep" ]; then # Skip empty elements, if any
                   continue
               fi
 
-              is_provided_by_current_build=false
-              for provided_item_raw in "${COLLECTED_PROVIDES_RAW_ITEMS[@]}"; do # Iterate over the raw items array
-                  if [ -z "$provided_item_raw" ]; then # Skip empty elements
-                      continue
-                  fi
-
-                  # Normalize the raw provided item:
-                  # 1. Get the name part (before any space, to remove " = version", " compat >= X", etc.)
-                  effective_provided_name="${provided_item_raw%% *}"
-                  # 2. Strip common HaikuPorter prefixes
-                  if [[ "$effective_provided_name" == devel:* ]]; then # Must be elif
-                      effective_provided_name="${effective_provided_name#devel:}"
-                  elif [[ "$effective_provided_name" == lib:* ]]; then
-                      effective_provided_name="${effective_provided_name#lib:}"
-                  elif [[ "$effective_provided_name" == cmd:* ]]; then
-                      effective_provided_name="${effective_provided_name#cmd:}"
-                  fi
-
-                  if [[ "$effective_provided_name" == "$dep" ]]; then
-                      is_provided_by_current_build=true
-                      echo "Debug: Dependency '$dep' is provided by '$provided_item_raw' (effective: '$effective_provided_name'). Will not install."
-                      break # This dependency is provided, no need to check further in collected_provides_array
-                  fi
-              done
-
-              if ! $is_provided_by_current_build; then
-                  echo "Debug: Dependency '$dep' is NOT provided by current build. Will be scheduled for install."
+              # Check if the dependency exists in the list of all available packages
+              if [[ -n "${all_available_packages_map[$dep]}" ]]; then
+                  echo "Debug: Dependency '$dep' exists in available Haiku packages. Will be scheduled for install."
                   final_dependencies_to_install_map["$dep"]=1
+              else
+                  # If a dependency is not in the main repo list, it might be one of the
+                  # packages being built in this batch, or an actual missing/mistyped dependency.
+                  # For now, we only install what's confirmed to be in the main repos.
+                  echo "Debug: Dependency '$dep' does NOT exist in the list of all available Haiku packages. It will be filtered out (may be built locally or is missing)."
               fi
           done
           DEPENDENCIES=$(for dep in "${!final_dependencies_to_install_map[@]}"; do
