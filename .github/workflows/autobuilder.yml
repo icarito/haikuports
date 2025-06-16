@@ -244,7 +244,7 @@ jobs:
             echo "Transferring changed_ports.tar.gz to VM..."
             cat changed_ports.tar.gz | docker exec -i haiku-vm vmshell "cat > /boot/home/haikuports/changed_ports.tar.gz"
             echo "Extracting changed ports in VM..."
-            docker exec haiku-vm vmshell "cd /boot/home/haikuports && tar -xzf changed_ports.tar.gz"
+            docker exec haiku-vm vmshell "cd /boot/home/haikuports && mkdir new-ports && tar -xzf changed_ports.tar.gz -C new-ports"
             echo "Transferred and extracted changed ports to /boot/home/haikuports in VM."
             docker exec haiku-vm vmshell "echo 'Contents of /boot/home/haikuports:'; ls -la /boot/home/haikuports"
           else
