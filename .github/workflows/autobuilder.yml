@@ -232,7 +232,7 @@ jobs:
         run: |
           echo "Installing basic build tools in VM (dependencies will be calculated later)..."
           docker exec haiku-vm vmshell pkgman install -y \
-            gcc binutils make cmake haikuporter
+            haikuporter
           echo "Basic build tools installation completed."
 
       - name: Transfer changed ports to VM
