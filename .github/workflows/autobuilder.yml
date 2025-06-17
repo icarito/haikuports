@@ -271,11 +271,21 @@ jobs:
             # Input: a clean package string (name-version or name-version-release)
             # Output: a clean base package name (e.g., libfoo_devel)
             derive_conflict_key_from_clean_string() {
-                local _pkg_str="$1"
+                local _pkg_str
+                read -r _pkg_str <<< "$1" # Ensure input is trimmed
+
                 local _name_part_analysis="$_pkg_str"
                 # Try to parse off version and release to get to a "name part"
-                if [[ "$_pkg_str" =~ ^(.*)-([0-9][^-._]*([._-][^-._]+)*)(-[0-9]+)?$ ]]; then # Handles name-version or name-version-release
-                    _name_part_analysis="${BASH_REMATCH[1]}"
+                # Handles patterns like name-version, name-version-release
+                # e.g., "libfoo-1.2.3-1" -> "libfoo"
+                # e.g., "libfoo_devel-1.2.3" -> "libfoo_devel"
+                # e.g., "python3.10-3.10.18" -> "python3.10"
+                if [[ "$_pkg_str" =~ ^(.*)-([0-9][0-9._a-zA-Z~]+(?:-[0-9]+)?)$ ]]; then
+                    local potential_name_part="${BASH_REMATCH[1]}"
+                    local potential_version_part="${BASH_REMATCH[2]}"
+                    if [[ -n "$potential_name_part" && "$potential_version_part" =~ ^[0-9] ]]; then
+                        _name_part_analysis="$potential_name_part"
+                    fi
                 fi
 
                 local _key_base_name="$_name_part_analysis"
@@ -294,74 +304,54 @@ jobs:
                         _key_base_name="${BASH_REMATCH[1]}"
                     fi
                 fi
-                echo "${_key_base_name}${_key_suffix}"
+                echo "${_key_base_name}${_key_suffix}" # Fixed typo: _key_suffix
             }
 
             OLD_IFS="$IFS"
             IFS=$'\n'
-            for raw_dep_entry_with_tab in $RAW_DEPS_LIST_STRING; do
+            for raw_dep_entry_line in $RAW_DEPS_LIST_STRING; do
               IFS="$OLD_IFS" # Restore IFS for internal processing
-              local dep_entry=$(echo "$raw_dep_entry_with_tab" | xargs) # Clean entry: remove leading/trailing whitespace
+              dep_entry="" 
+              read -r dep_entry <<< "$raw_dep_entry_line" # Read the line
+              dep_entry=$(echo "$dep_entry" | xargs) # Ensure it's thoroughly cleaned of leading/trailing whitespace
+
               if [ -z "$dep_entry" ]; then continue; fi
 
               original_dep_entry="$dep_entry"
-              name_part_analysis="$dep_entry"
               version_str="0" # Default for comparison if no version found
 
-              # Try to parse name-version-release or name-version
-              # Example: libfoo-devel-1.2.3-1 -> name_part_analysis=libfoo-devel, version_str=1.2.3
-              # Example: libfoo-1.2-beta1-1 -> name_part_analysis=libfoo, version_str=1.2-beta1
-              # Example: libunibreak4.0_devel-4.0-2 -> name_part_analysis=libunibreak4.0_devel, version_str=4.0
-              
-              temp_str_for_parsing="$dep_entry"
-              # Tentatively extract release part (everything after the last hyphen)
-              release_candidate="${temp_str_for_parsing##*-}"
-              name_and_version_candidate="${temp_str_for_parsing%-*}"
-
-              if [[ "$name_and_version_candidate" =~ ^(.*)-([0-9][^-]*)$ ]]; then
-                  # Common case: name-version or name-version (where version was extracted from name-version-release)
-                  name_part_analysis="${BASH_REMATCH[1]}"
-                  version_str="${BASH_REMATCH[2]}"
-              elif [[ "$dep_entry" =~ ^(.*)-([0-9][^-]*)$ ]]; then
-                  # Case: name-version (no separate release part in original string)
-                  name_part_analysis="${BASH_REMATCH[1]}"
-                  version_str="${BASH_REMATCH[2]}"
+              # Extract version_str from original_dep_entry (e.g., "libfoo-1.2.3-1" -> "1.2.3-1")
+              # This logic is crucial for sort -V to work correctly.
+              if [[ "$original_dep_entry" =~ ^(.*)-([0-9][0-9._a-zA-Z~]+)-([0-9]+)$ ]]; then # name-version-release
+                  # BASH_REMATCH[1] is name part, BASH_REMATCH[2] is version, BASH_REMATCH[3] is release
+                  # Ensure name part is not empty and version starts with a digit
+                  if [[ -n "${BASH_REMATCH[1]}" && "${BASH_REMATCH[2]}" =~ ^[0-9] ]]; then
+                      version_str="${BASH_REMATCH[2]}-${BASH_REMATCH[3]}"
+                  else
+                      version_str="0" # Fallback
+                  fi
+              elif [[ "$original_dep_entry" =~ ^(.*)-([0-9][0-9._a-zA-Z~]+)$ ]]; then # name-version
+                  # BASH_REMATCH[1] is name part, BASH_REMATCH[2] is version
+                  # Ensure name part is not empty and version starts with a digit
+                  if [[ -n "${BASH_REMATCH[1]}" && "${BASH_REMATCH[2]}" =~ ^[0-9] ]]; then
+                      version_str="${BASH_REMATCH[2]}"
+                  else
+                      version_str="0" # Fallback
+                  fi
               else
-                  # No standard version pattern found at the end, treat whole entry as name_part_analysis
-                  name_part_analysis="$dep_entry"
                   version_str="0" # Unversioned or unknown version format
               fi
 
-              # Determine conflict_resolution_key from name_part_analysis
-              key_base_name="${name_part_analysis}"
-              key_suffix=""
+              conflict_key=$(derive_conflict_key_from_clean_string "$original_dep_entry")
 
-              # Extract common suffixes like _devel, _doc, etc.
-              if [[ "$name_part_analysis" =~ ^(.*?)(_devel|_debuginfo|_doc|_test|_tools|_common|_x86|_source|_headers|_examples|_data|)$ ]]; then
-                  potential_base="${BASH_REMATCH[1]}"
-                  if [[ -n "$potential_base" ]]; then # Ensure base is not empty
-                      key_base_name="$potential_base"
-                      key_suffix="${BASH_REMATCH[2]}"
-                  fi
-              fi
-
-              # Remove embedded version numbers from key_base_name (e.g., libfoo4.0 -> libfoo, icu71 -> icu, python3 -> python)
-              if [[ "$key_base_name" =~ ^(.*[a-zA-Z_])([0-9]+[0-9\._]*)$ ]]; then
-                  # Check if the first part (non-version) is non-empty
-                  if [[ -n "${BASH_REMATCH[1]}" ]]; then
-                      key_base_name="${BASH_REMATCH[1]}"
-                  fi
-              fi
-              conflict_key="${key_base_name}${key_suffix}"
-
-              echo "  Processing: '$original_dep_entry' -> name_part_analysis='$name_part_analysis', version_str='$version_str', conflict_key='$conflict_key'"
+              echo "  Processing: '$original_dep_entry' -> version_str='$version_str', conflict_key='$conflict_key'"
 
               current_stored_version=${chosen_package_versions[$conflict_key]:-}
 
               if [[ -z "$current_stored_version" ]]; then # No package for this conflict_key yet
                 chosen_package_versions[$conflict_key]="$version_str"
                 chosen_package_entries[$conflict_key]="$original_dep_entry"
-                echo "    Adding new: '$original_dep_entry' (Version: $version_str)"
+                echo "    Adding new for '$conflict_key': '$original_dep_entry' (Version: $version_str)"
               else
                 # Compare version_str with current_stored_version using sort -V
                 # winner will be the highest version string
@@ -378,39 +368,42 @@ jobs:
             done
             IFS="$OLD_IFS" # Restore IFS
 
+            # Populate RESOLVED_DEPENDENCIES_LIST with the *base names* (conflict_keys)
             if [ ${#chosen_package_entries[@]} -gt 0 ]; then
               for key in "${!chosen_package_entries[@]}"; do
-                RESOLVED_DEPENDENCIES_LIST+=("${chosen_package_entries[$key]}")
+                RESOLVED_DEPENDENCIES_LIST+=("$key") # Add the conflict_key (base name)
               done
             fi
-            echo "After version conflict resolution, chosen dependencies:"
-            printf "  %s\n" "${RESOLVED_DEPENDENCIES_LIST[@]}" # Print each on a new line for clarity
+            echo "After version conflict resolution, chosen base dependencies (to be installed by base name):"
+            printf "  '%s'\n" "${RESOLVED_DEPENDENCIES_LIST[@]}" # Print each on a new line for clarity, quoted
           fi
 
           # Filter resolved dependencies against available repository packages
           echo "Fetching list of all available packages from repositories..."
           ALL_RAW_AVAILABLE_PACKAGES_OUTPUT=$(docker exec haiku-vm vmshell "pkgman search -a | sed s/^........//g | cut -d \" \" -f 1")
           declare -A all_available_packages_map
-          while IFS= read -r pkg_name_full_raw; do
-              local_trimmed_pkg_name_full=$(echo "$pkg_name_full_raw" | xargs) # Trim whitespace, gives name-version-release
-              if [ -n "$local_trimmed_pkg_name_full" ]; then
-                  # Strip release number to get name-version, e.g., "foo-1.2.3-1" becomes "foo-1.2.3"
-                  local_pkg_name_nv=$(echo "$local_trimmed_pkg_name_full" | sed 's/^\(.*\)-[0-9]\+$/\1/')
-                  all_available_packages_map["$local_pkg_name_nv"]=1 # Store by name-version
+          while IFS= read -r raw_pkg_name_from_repo; do
+              local clean_pkg_name_from_repo
+              read -r clean_pkg_name_from_repo <<< "$raw_pkg_name_from_repo" # Clean name-version-release
+
+              if [ -n "$clean_pkg_name_from_repo" ]; then
+                  local base_name_from_repo=$(derive_conflict_key_from_clean_string "$clean_pkg_name_from_repo")
+                  if [ -n "$base_name_from_repo" ]; then
+                    all_available_packages_map["$base_name_from_repo"]=1 # Store by base name
+                  fi
               fi
           done <<< "$ALL_RAW_AVAILABLE_PACKAGES_OUTPUT"
-          echo "Found ${#all_available_packages_map[@]} available packages in repositories."
+          echo "Found ${#all_available_packages_map[@]} unique base names in available packages."
 
           FINAL_INSTALL_LIST=()
           if [ ${#RESOLVED_DEPENDENCIES_LIST[@]} -gt 0 ]; then
-            echo "Filtering resolved dependencies against available repository packages..."
-            for dep_to_check in "${RESOLVED_DEPENDENCIES_LIST[@]}"; do
-              trimmed_dep_to_check=$(echo "$dep_to_check" | xargs)
-              # trimmed_dep_to_check should now be clean name-version (e.g., openexr3.2_devel-3.2.4)
-              if [[ -n "${all_available_packages_map[$trimmed_dep_to_check]}" ]]; then # Check if this name-version exists in the map
-                FINAL_INSTALL_LIST+=("$trimmed_dep_to_check") # Add the name-version string for pkgman to install
+            echo "Filtering resolved base dependencies against available repository base names..."
+            for base_dep_to_check in "${RESOLVED_DEPENDENCIES_LIST[@]}"; do
+              # base_dep_to_check is already a clean conflict key (base name)
+              if [[ -n "${all_available_packages_map[$base_dep_to_check]}" ]]; then
+                FINAL_INSTALL_LIST+=("$base_dep_to_check") # Add the base name string for pkgman to install
               else
-                echo "Warning: Dependency '$trimmed_dep_to_check' (chosen after conflict resolution) not found in available packages, skipping."
+                echo "Warning: Base dependency '$base_dep_to_check' (chosen after conflict resolution) not found in available packages, skipping."
               fi
             done
           fi
@@ -419,7 +412,7 @@ jobs:
             echo "No external dependencies to install (either none found, all are built locally, or all filtered out)."
             DEPENDENCIES=""
           else
-            DEPENDENCIES=$(echo "${FINAL_INSTALL_LIST[@]}" | xargs) # Space separated string
+            DEPENDENCIES=$(echo "${FINAL_INSTALL_LIST[@]}" | xargs) # Space separated string of base names
             echo "Installing calculated dependencies in VM..."
             docker exec haiku-vm vmshell "pkgman install -y $DEPENDENCIES" || {
               echo "Warning: Some dependencies failed to install, continuing with build..."
