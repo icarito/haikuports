@@ -174,7 +174,6 @@ jobs:
       - name: Debug cache restore results
         run: |
           echo "=== DEBUG: Cache restore results ==="
-          echo "Cache hit result: ${{ steps.restore-cache.outputs.cache-hit }}"
           echo "Cache key used: ${{ runner.os }}-haiku-deps-${{ github.sha }}"
           echo "Files in current directory:"
           ls -la
@@ -262,6 +261,46 @@ jobs:
           CHANGED_RECIPES='${{ needs.prepare-build.outputs.changed_recipes_space_separated }}'
           echo "Changed recipes: $CHANGED_RECIPES"
 
+          # Function to derive conflict key (base package name)
+          # Input: a clean package string (name-version or name-version-release)
+          # Output: a clean base package name (e.g., libfoo_devel)
+          derive_conflict_key_from_clean_string() {
+              local _pkg_str
+              _pkg_str=$(echo "$1" | xargs) # Ensure input is trimmed
+
+              local _name_part_analysis="$_pkg_str"
+
+              # Step 1: Isolate the name part from version and release
+              # Try name-version-release first
+              if [[ "$_pkg_str" =~ ^(.+)-([0-9][0-9a-zA-Z._~]+)-([0-9]+)$ ]]; then
+                  _name_part_analysis="${BASH_REMATCH[1]}"
+              # Then try name-version
+              elif [[ "$_pkg_str" =~ ^(.+)-([0-9][0-9a-zA-Z._~]+)$ ]]; then
+                  # Check if BASH_REMATCH[2] is purely a version (starts with digit)
+                  # and BASH_REMATCH[1] is not empty.
+                  if [[ "${BASH_REMATCH[2]}" =~ ^[0-9] && -n "${BASH_REMATCH[1]}" ]]; then
+                      _name_part_analysis="${BASH_REMATCH[1]}"
+                  fi
+              fi
+
+              local _key_base_name="$_name_part_analysis"
+              local _key_suffix=""
+
+              if [[ "$_name_part_analysis" =~ ^(.*?)(_devel|_debuginfo|_doc|_test|_tools|_common|_x86|_source|_headers|_examples|_data)$ ]]; then
+                  _potential_base="${BASH_REMATCH[1]}"
+                  if [[ -n "$_potential_base" ]]; then
+                      _key_base_name="$_potential_base"
+                      _key_suffix="${BASH_REMATCH[2]}"
+                  fi
+              fi
+              if [[ "$_key_base_name" =~ ^(.*[a-zA-Z_])([0-9]+([._][0-9A-Za-z~]+)*)$ ]]; then
+                  if [[ -n "${BASH_REMATCH[1]}" ]]; then
+                      _key_base_name="${BASH_REMATCH[1]}"
+                  fi
+              fi
+              echo "${_key_base_name}${_key_suffix}"
+          }
+
           echo "Using HaikuPorter in VM to calculate raw dependencies..."
           RAW_DEPS_LIST_STRING=$(docker exec haiku-vm vmshell "cd /boot/home/haikuports && haikuporter --no-repository-update --list-dependencies $CHANGED_RECIPES" | grep ">" | sed -e 's/^[[:space:]]*>[[:space:]]*//' -e 's/[[:space:]]*\(->\|-\)[[:space:]].*//' | sort -u)
 
@@ -275,52 +314,6 @@ jobs:
 
             declare -A chosen_package_versions
             declare -A chosen_package_entries
-
-            # Function to derive conflict key (base package name)
-            # Input: a clean package string (name-version or name-version-release)
-            # Output: a clean base package name (e.g., libfoo_devel)
-            derive_conflict_key_from_clean_string() {
-                local _pkg_str
-                _pkg_str=$(echo "$1" | xargs) # Ensure input is trimmed
-
-                local _name_part_analysis="$_pkg_str"
-
-                # Try to parse off version and release to get to a "name part"
-                # Try name-version-release first
-                if [[ "$_pkg_str" =~ ^(.+)-([0-9][0-9a-zA-Z._~]+)-([0-9]+)$ ]]; then
-                    _name_part_analysis="${BASH_REMATCH[1]}"
-                # Then try name-version
-                elif [[ "$_pkg_str" =~ ^(.+)-([0-9][0-9a-zA-Z._~]+)$ ]]; then
-                    # Check if BASH_REMATCH[2] is purely a version (starts with digit)
-                    # and BASH_REMATCH[1] is not empty.
-                    if [[ "${BASH_REMATCH[2]}" =~ ^[0-9] && -n "${BASH_REMATCH[1]}" ]]; then
-                        _name_part_analysis="${BASH_REMATCH[1]}"
-                    fi
-                fi
-                # At this point, _name_part_analysis should be like "libfoo_devel" or "python3.10" or "libunibreak4.0_devel"
-
-                local _key_base_name="$_name_part_analysis"
-                local _key_suffix=""
-
-                # Step 2: Extract common suffixes like _devel, _doc, etc.
-                if [[ "$_name_part_analysis" =~ ^(.*?)(_devel|_debuginfo|_doc|_test|_tools|_common|_x86|_source|_headers|_examples|_data)$ ]]; then
-                    _potential_base="${BASH_REMATCH[1]}"
-                    if [[ -n "$_potential_base" ]]; then
-                        _key_base_name="$_potential_base"
-                        _key_suffix="${BASH_REMATCH[2]}"
-                    fi
-                fi
-                # Now _key_base_name might be "libunibreak4.0", _key_suffix "_devel"
-
-                # Step 3: Remove embedded version numbers from _key_base_name
-                # (e.g., libfoo4.0 -> libfoo, icu71 -> icu, python3.10 -> python)
-                if [[ "$_key_base_name" =~ ^(.*[a-zA-Z_])([0-9]+([._][0-9A-Za-z~]+)*)$ ]]; then
-                    if [[ -n "${BASH_REMATCH[1]}" ]]; then
-                        _key_base_name="${BASH_REMATCH[1]}"
-                    fi
-                fi
-                echo "${_key_base_name}${_key_suffix}" # Fixed typo: _key_suffix
-            }
 
             OLD_IFS="$IFS"
             IFS=$'\n'
