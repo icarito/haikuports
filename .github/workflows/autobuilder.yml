@@ -267,7 +267,49 @@ jobs:
           else
             echo "All dependencies found: $ALL_DEPENDENCIES"
             
-            echo "Fetching list of all available packages from HaikuPorter..."
+            # Filter out conflicting versions (keep only highest version)
+            echo "Filtering conflicting package versions..."
+            declare -A package_versions
+            FILTERED_DEPS=""
+            
+            for dep in $ALL_DEPENDENCIES; do
+              # Extract base package name and version
+              if [[ "$dep" =~ ^([a-zA-Z_]+)([0-9]+)(_.*)?$ ]]; then
+                base_name="${BASH_REMATCH[1]}"
+                version="${BASH_REMATCH[2]}"
+                suffix="${BASH_REMATCH[3]}"
+                full_base="${base_name}${suffix}"
+                
+                echo "Found versioned package: $dep (base: $base_name, version: $version, suffix: $suffix)"
+                
+                # Check if we already have this base package
+                if [[ -n "${package_versions[$full_base]}" ]]; then
+                  current_version="${package_versions[$full_base]}"
+                  if [[ "$version" -gt "$current_version" ]]; then
+                    echo "  Replacing ${base_name}${current_version}${suffix} with $dep (higher version)"
+                    package_versions[$full_base]="$version"
+                    # Remove old version from filtered deps and add new one
+                    FILTERED_DEPS=$(echo "$FILTERED_DEPS" | sed "s/${base_name}${current_version}${suffix}//g")
+                    FILTERED_DEPS="$FILTERED_DEPS $dep"
+                  else
+                    echo "  Keeping ${base_name}${current_version}${suffix} (higher than $dep)"
+                  fi
+                else
+                  echo "  Adding $dep (first occurrence of $full_base)"
+                  package_versions[$full_base]="$version"
+                  FILTERED_DEPS="$FILTERED_DEPS $dep"
+                fi
+              else
+                # No version number detected, add as-is
+                FILTERED_DEPS="$FILTERED_DEPS $dep"
+              fi
+            done
+            
+            # Clean up extra spaces
+            ALL_DEPENDENCIES=$(echo "$FILTERED_DEPS" | xargs)
+            echo "After version filtering: $ALL_DEPENDENCIES"
+            
+            echo "Fetching list of all available packages from repositories..."
             ALL_AVAILABLE_PACKAGES_OUTPUT=$(docker exec haiku-vm vmshell "pkgman search -a | sed s/^........//g | cut -d \" \" -f 1")
             declare -A all_available_packages_map
             while IFS= read -r pkg_name; do
@@ -278,10 +320,8 @@ jobs:
                 fi
             done <<< "$ALL_AVAILABLE_PACKAGES_OUTPUT"
             echo "Found ${#all_available_packages_map[@]} available packages in repositories."
-            # For debugging a small sample:
-            # echo "Sample of available packages: $(for k in "${!all_available_packages_map[@]}"; do echo "$k"; done | head -n 10 | xargs)"
 
-            # Filter dependencies not available in ALL_AVAILABLE_PACKAGES_MAP
+            # Filter dependencies not available in repositories
             DEPENDENCIES=""
             for dep in $ALL_DEPENDENCIES; do
               # Check if this dependency is available in the map
@@ -295,34 +335,6 @@ jobs:
             echo "Calculated dependencies to install: $DEPENDENCIES"
           fi
 
-          declare -A latest_packages
-          echo Hola 1
-          for pkg in $DEPENDENCIES; do
-              echo $pkg
-              base_name=$(echo "$pkg" | sed -E 's/[0-9._-]+.*//')
-              if [[ -n "${latest_packages[$base_name]}" && "${latest_packages[$base_name]}" > "$pkg" ]]; thenAdd commentMore actions
-                  continue
-              fi
-              latest_packages["$base_name"]="$pkg"
-          done
-          echo Hola 2
-          DEPENDENCIES=$(for pkg in "${latest_packages[@]}"; do
-              echo "$pkg"
-          done | sort)
- 
-          echo "Final dependency list: $DEPENDENCIES"
-          
-          if [ -z "$DEPENDENCIES" ]; then
-            echo "No external dependencies to install (all dependencies are being built or none found)"
-          else
-            echo "Final filtered dependency list: $DEPENDENCIES"
-            echo "Installing calculated dependencies in VM..."
-            docker exec haiku-vm vmshell "pkgman install -y $DEPENDENCIES" || {
-              echo "Warning: Some dependencies failed to install, continuing with build..."
-            }
-          fi
-
-          
           if [ -z "$DEPENDENCIES" ]; then
             echo "No external dependencies to install (all dependencies are being built or none found)"
           else
@@ -373,8 +385,6 @@ jobs:
             fi
             if [ -d work ]; then
               find work -name '*.log' -type f | head -n 20 | tar -czf /boot/home/haikuports/build-logs.tar.gz -T - 2>/dev/null || \
-              tar -czf /boot/home/haikuports/build-logs.tar.gz --files-from /dev/null
-            else
               tar -czf /boot/home/haikuports/build-logs.tar.gz --files-from /dev/null
             fi"
           docker exec haiku-vm vmshell cat /boot/home/haikuports/built-packages.tar.gz > build-artifacts/built-packages.tar.gz || true
