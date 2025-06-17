@@ -296,13 +296,16 @@ jobs:
           fi
 
           declare -A latest_packages
+          echo Hola 1
           for pkg in $DEPENDENCIES; do
+              echo $pkg
               base_name=$(echo "$pkg" | sed -E 's/[0-9._-]+.*//')
               if [[ -n "${latest_packages[$base_name]}" && "${latest_packages[$base_name]}" > "$pkg" ]]; thenAdd commentMore actions
                   continue
               fi
               latest_packages["$base_name"]="$pkg"
           done
+          echo Hola 2
           DEPENDENCIES=$(for pkg in "${latest_packages[@]}"; do
               echo "$pkg"
           done | sort)
