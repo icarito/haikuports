@@ -294,6 +294,31 @@ jobs:
             DEPENDENCIES=$(echo "$DEPENDENCIES" | xargs)  # Clean up extra spaces
             echo "Calculated dependencies to install: $DEPENDENCIES"
           fi
+
+          declare -A latest_packages
+          for pkg in $DEPENDENCIES; do
+              base_name=$(echo "$pkg" | sed -E 's/[0-9._-]+.*//')
+              if [[ -n "${latest_packages[$base_name]}" && "${latest_packages[$base_name]}" > "$pkg" ]]; thenAdd commentMore actions
+                  continue
+              fi
+              latest_packages["$base_name"]="$pkg"
+          done
+          DEPENDENCIES=$(for pkg in "${latest_packages[@]}"; do
+              echo "$pkg"
+          done | sort)
+ 
+          echo "Final dependency list: $DEPENDENCIES"
+          
+          if [ -z "$DEPENDENCIES" ]; then
+            echo "No external dependencies to install (all dependencies are being built or none found)"
+          else
+            echo "Final filtered dependency list: $DEPENDENCIES"
+            echo "Installing calculated dependencies in VM..."
+            docker exec haiku-vm vmshell "pkgman install -y $DEPENDENCIES" || {
+              echo "Warning: Some dependencies failed to install, continuing with build..."
+            }
+          fi
+
           
           if [ -z "$DEPENDENCIES" ]; then
             echo "No external dependencies to install (all dependencies are being built or none found)"
