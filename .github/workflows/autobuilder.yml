@@ -116,13 +116,15 @@ jobs:
           echo "Packaging changed ports directories..."
           CHANGED_RECIPES='${{ steps.detect-changes.outputs.changed_recipes_space_separated }}'
           echo "Changed recipes: $CHANGED_RECIPES"
-          
+
           mkdir -p changed_ports_temp
-          
-          for recipe in $CHANGED_RECIPES; do
+
+          CHANGED_PATHS=$(git diff --name-only origin/master HEAD -- '*-*/*' | xargs echo )
+          # place the file in the same location but in the temp directory
+          for path in $CHANGED_PATHS; do
             cp -aRv --parents $path changed_ports_temp/ || true
           done
-          
+
           if [ -d "changed_ports_temp" ] && [ "$(ls -A changed_ports_temp)" ]; then
             tar -czf changed_ports.tar.gz -C changed_ports_temp .
             echo "Created changed_ports.tar.gz with contents:"
@@ -143,9 +145,7 @@ jobs:
             repository/*
             changed_ports.tar.gz
           key: ${{ runner.os }}-haiku-deps-${{ github.sha }}
-          restore-keys: |
-            ${{ runner.os }}-haiku-deps-${{ github.sha }}
-            ${{ runner.os }}-haiku-deps-
+
 
   build-haikuports: 
     runs-on: ubuntu-latest
@@ -163,7 +163,6 @@ jobs:
           key: ${{ runner.os }}-haiku-deps-${{ github.sha }}
           restore-keys: |
             ${{ runner.os }}-haiku-deps-${{ github.sha }}
-            ${{ runner.os }}-haiku-deps-
 
       - name: Debug cache restore results
         run: |
@@ -183,7 +182,7 @@ jobs:
             echo "✓ changed_ports.tar.gz found"
             echo "Size: $(du -h changed_ports.tar.gz | cut -f1)"
             echo "Contents preview:"
-            tar -tzf changed_ports.tar.gz | head -n 10
+            tar -tzf changed_ports.tar.gz
           else
             echo "✗ changed_ports.tar.gz NOT found"
           fi
@@ -221,7 +220,7 @@ jobs:
             echo "Extracting changed ports in VM..."
             docker exec haiku-vm vmshell "cd /boot/home/haikuports && tar -xzf changed_ports.tar.gz"
             echo "Transferred and extracted changed ports to /boot/home/haikuports in VM."
-            docker exec haiku-vm vmshell "echo 'Contents of /boot/home/haikuports:'; ls -la /boot/home/haikuports"
+            docker exec haiku-vm vmshell "echo 'Contents of /boot/home/haikuports:'; find /boot/home/haikuports/"
           else
             echo "✗ changed_ports.tar.gz not found on runner. Cannot transfer ports."
             exit 1
@@ -263,12 +262,12 @@ jobs:
             DEPENDENCIES=""
           else
             echo "All dependencies found: $ALL_DEPENDENCIES"
-            
+
             # Filter out conflicting versions (keep only highest version)
             echo "Filtering conflicting package versions..."
             declare -A package_versions
             FILTERED_DEPS=""
-            
+
             for dep in $ALL_DEPENDENCIES; do
               # Extract base package name and version
               if [[ "$dep" =~ ^([a-zA-Z_]+)([0-9]+)(_.*)?$ ]]; then
@@ -276,9 +275,9 @@ jobs:
                 version="${BASH_REMATCH[2]}"
                 suffix="${BASH_REMATCH[3]}"
                 full_base="${base_name}${suffix}"
-                
+
                 echo "Found versioned package: $dep (base: $base_name, version: $version, suffix: $suffix)"
-                
+
                 # Check if we already have this base package
                 if [[ -n "${package_versions[$full_base]}" ]]; then
                   current_version="${package_versions[$full_base]}"
@@ -301,11 +300,11 @@ jobs:
                 FILTERED_DEPS="$FILTERED_DEPS $dep"
               fi
             done
-            
+
             # Clean up extra spaces
             ALL_DEPENDENCIES=$(echo "$FILTERED_DEPS" | xargs)
             echo "After version filtering: $ALL_DEPENDENCIES"
-            
+
             echo "Fetching list of all available packages from repositories..."
             ALL_AVAILABLE_PACKAGES_OUTPUT=$(docker exec haiku-vm vmshell "pkgman search -a | sed s/^........//g | cut -d \" \" -f 1")
             declare -A all_available_packages_map
