@@ -267,10 +267,41 @@ jobs:
             declare -A chosen_package_versions
             declare -A chosen_package_entries
 
+            # Function to derive conflict key (base package name)
+            # Input: a clean package string (name-version or name-version-release)
+            # Output: a clean base package name (e.g., libfoo_devel)
+            derive_conflict_key_from_clean_string() {
+                local _pkg_str="$1"
+                local _name_part_analysis="$_pkg_str"
+                # Try to parse off version and release to get to a "name part"
+                if [[ "$_pkg_str" =~ ^(.*)-([0-9][^-._]*([._-][^-._]+)*)(-[0-9]+)?$ ]]; then # Handles name-version or name-version-release
+                    _name_part_analysis="${BASH_REMATCH[1]}"
+                fi
+
+                local _key_base_name="$_name_part_analysis"
+                local _key_suffix=""
+
+                if [[ "$_name_part_analysis" =~ ^(.*?)(_devel|_debuginfo|_doc|_test|_tools|_common|_x86|_source|_headers|_examples|_data|)$ ]]; then
+                    _potential_base="${BASH_REMATCH[1]}"
+                    if [[ -n "$_potential_base" ]]; then
+                        _key_base_name="$_potential_base"
+                        _key_suffix="${BASH_REMATCH[2]}"
+                    fi
+                fi
+
+                if [[ "$_key_base_name" =~ ^(.*[a-zA-Z_])([0-9]+([._][0-9]+)*)$ ]]; then # More specific version stripping from base
+                    if [[ -n "${BASH_REMATCH[1]}" ]]; then
+                        _key_base_name="${BASH_REMATCH[1]}"
+                    fi
+                fi
+                echo "${_key_base_name}${_key_suffix}"
+            }
+
             OLD_IFS="$IFS"
             IFS=$'\n'
-            for dep_entry in $RAW_DEPS_LIST_STRING; do
+            for raw_dep_entry_with_tab in $RAW_DEPS_LIST_STRING; do
               IFS="$OLD_IFS" # Restore IFS for internal processing
+              local dep_entry=$(echo "$raw_dep_entry_with_tab" | xargs) # Clean entry: remove leading/trailing whitespace
               if [ -z "$dep_entry" ]; then continue; fi
 
               original_dep_entry="$dep_entry"
