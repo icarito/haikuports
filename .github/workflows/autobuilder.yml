@@ -145,7 +145,6 @@ jobs:
           key: ${{ runner.os }}-haiku-deps-${{ github.sha }}
           restore-keys: |
             ${{ runner.os }}-haiku-deps-${{ github.sha }}
-            ${{ runner.os }}-haiku-deps-
 
   build-haikuports: 
     runs-on: ubuntu-latest
@@ -163,7 +162,6 @@ jobs:
           key: ${{ runner.os }}-haiku-deps-${{ github.sha }}
           restore-keys: |
             ${{ runner.os }}-haiku-deps-${{ github.sha }}
-            ${{ runner.os }}-haiku-deps-
 
       - name: Debug cache restore results
         run: |
