@@ -361,8 +361,8 @@ jobs:
             NUM_PACKAGES=$(echo \"$RECIPE_ARGS\" | wc -w) ; \
             echo \"- Packages attempted: $NUM_PACKAGES\" ; \
             if [ -d packages ] && ls packages/*.hpkg >/dev/null 2>&1; then \
-              echo \"- Built packages: $(ls packages/*.hpkg | wc -l)\" ; \
-              echo \"- Package files: $(ls packages/*.hpkg | xargs basename -a | tr '\n' ' ')\" ; \
+              echo \"- Built packages: \$(ls packages/*.hpkg | wc -l)\" ; \
+              echo \"- Package files: \$(ls packages/*.hpkg | xargs basename -a | tr '\n' ' ')\" ; \
             else \
               echo \"- Built packages: 0\" ; \
             fi"
