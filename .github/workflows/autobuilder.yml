@@ -253,88 +253,142 @@ jobs:
           CHANGED_RECIPES='${{ needs.prepare-build.outputs.changed_recipes_space_separated }}'
           echo "Changed recipes: $CHANGED_RECIPES"
 
-          echo "Using HaikuPorter in VM to calculate dependencies..."
-          # Get all dependencies first
-          ALL_DEPENDENCIES=$(docker exec haiku-vm vmshell "cd /boot/home/haikuports && haikuporter --no-repository-update --list-dependencies $CHANGED_RECIPES" | grep ">" | cut -d "-" -f 1 | sort -u | xargs echo)
+          echo "Using HaikuPorter in VM to calculate raw dependencies..."
+          RAW_DEPS_LIST_STRING=$(docker exec haiku-vm vmshell "cd /boot/home/haikuports && haikuporter --no-repository-update --list-dependencies $CHANGED_RECIPES" | grep ">" | sed -e 's/^[[:space:]]*>[[:space:]]*//' -e 's/[[:space:]]*\(->\|-\)[[:space:]].*//' | sort -u)
 
-          if [ -z "$ALL_DEPENDENCIES" ]; then
-            echo "No dependencies found by HaikuPorter, using minimal base set"
-            DEPENDENCIES=""
+          RESOLVED_DEPENDENCIES_LIST=()
+          if [ -z "$RAW_DEPS_LIST_STRING" ]; then
+            echo "No dependencies found by HaikuPorter."
           else
-            echo "All dependencies found: $ALL_DEPENDENCIES"
-
-            # Filter out conflicting versions (keep only highest version)
+            echo "Raw dependencies found from HaikuPorter:"
+            echo "$RAW_DEPS_LIST_STRING"
             echo "Filtering conflicting package versions..."
-            declare -A package_versions
-            FILTERED_DEPS=""
 
-            for dep in $ALL_DEPENDENCIES; do
-              # Extract base package name and version
-              if [[ "$dep" =~ ^([a-zA-Z_]+)([0-9]+)(_.*)?$ ]]; then
-                base_name="${BASH_REMATCH[1]}"
-                version="${BASH_REMATCH[2]}"
-                suffix="${BASH_REMATCH[3]}"
-                full_base="${base_name}${suffix}"
+            declare -A chosen_package_versions
+            declare -A chosen_package_entries
 
-                echo "Found versioned package: $dep (base: $base_name, version: $version, suffix: $suffix)"
+            OLD_IFS="$IFS"
+            IFS=$'\n'
+            for dep_entry in $RAW_DEPS_LIST_STRING; do
+              IFS="$OLD_IFS" # Restore IFS for internal processing
+              if [ -z "$dep_entry" ]; then continue; fi
 
-                # Check if we already have this base package
-                if [[ -n "${package_versions[$full_base]}" ]]; then
-                  current_version="${package_versions[$full_base]}"
-                  if [[ "$version" -gt "$current_version" ]]; then
-                    echo "  Replacing ${base_name}${current_version}${suffix} with $dep (higher version)"
-                    package_versions[$full_base]="$version"
-                    # Remove old version from filtered deps and add new one
-                    FILTERED_DEPS=$(echo "$FILTERED_DEPS" | sed "s/${base_name}${current_version}${suffix}//g")
-                    FILTERED_DEPS="$FILTERED_DEPS $dep"
-                  else
-                    echo "  Keeping ${base_name}${current_version}${suffix} (higher than $dep)"
+              original_dep_entry="$dep_entry"
+              name_part_analysis="$dep_entry"
+              version_str="0" # Default for comparison if no version found
+
+              # Try to parse name-version-release or name-version
+              # Example: libfoo-devel-1.2.3-1 -> name_part_analysis=libfoo-devel, version_str=1.2.3
+              # Example: libfoo-1.2-beta1-1 -> name_part_analysis=libfoo, version_str=1.2-beta1
+              # Example: libunibreak4.0_devel-4.0-2 -> name_part_analysis=libunibreak4.0_devel, version_str=4.0
+              
+              temp_str_for_parsing="$dep_entry"
+              # Tentatively extract release part (everything after the last hyphen)
+              release_candidate="${temp_str_for_parsing##*-}"
+              name_and_version_candidate="${temp_str_for_parsing%-*}"
+
+              if [[ "$name_and_version_candidate" =~ ^(.*)-([0-9][^-]*)$ ]]; then
+                  # Common case: name-version or name-version (where version was extracted from name-version-release)
+                  name_part_analysis="${BASH_REMATCH[1]}"
+                  version_str="${BASH_REMATCH[2]}"
+              elif [[ "$dep_entry" =~ ^(.*)-([0-9][^-]*)$ ]]; then
+                  # Case: name-version (no separate release part in original string)
+                  name_part_analysis="${BASH_REMATCH[1]}"
+                  version_str="${BASH_REMATCH[2]}"
+              else
+                  # No standard version pattern found at the end, treat whole entry as name_part_analysis
+                  name_part_analysis="$dep_entry"
+                  version_str="0" # Unversioned or unknown version format
+              fi
+
+              # Determine conflict_resolution_key from name_part_analysis
+              key_base_name="${name_part_analysis}"
+              key_suffix=""
+
+              # Extract common suffixes like _devel, _doc, etc.
+              if [[ "$name_part_analysis" =~ ^(.*?)(_devel|_debuginfo|_doc|_test|_tools|_common|_x86|_source|_headers|_examples|_data|)$ ]]; then
+                  potential_base="${BASH_REMATCH[1]}"
+                  if [[ -n "$potential_base" ]]; then # Ensure base is not empty
+                      key_base_name="$potential_base"
+                      key_suffix="${BASH_REMATCH[2]}"
                   fi
+              fi
+
+              # Remove embedded version numbers from key_base_name (e.g., libfoo4.0 -> libfoo, icu71 -> icu, python3 -> python)
+              if [[ "$key_base_name" =~ ^(.*[a-zA-Z_])([0-9]+[0-9\._]*)$ ]]; then
+                  # Check if the first part (non-version) is non-empty
+                  if [[ -n "${BASH_REMATCH[1]}" ]]; then
+                      key_base_name="${BASH_REMATCH[1]}"
+                  fi
+              fi
+              conflict_key="${key_base_name}${key_suffix}"
+
+              echo "  Processing: '$original_dep_entry' -> name_part_analysis='$name_part_analysis', version_str='$version_str', conflict_key='$conflict_key'"
+
+              current_stored_version=${chosen_package_versions[$conflict_key]:-}
+
+              if [[ -z "$current_stored_version" ]]; then # No package for this conflict_key yet
+                chosen_package_versions[$conflict_key]="$version_str"
+                chosen_package_entries[$conflict_key]="$original_dep_entry"
+                echo "    Adding new: '$original_dep_entry' (Version: $version_str)"
+              else
+                # Compare version_str with current_stored_version using sort -V
+                # winner will be the highest version string
+                winner=$(printf "%s\n%s" "$current_stored_version" "$version_str" | sort -V | tail -n1)
+                
+                if [[ "$winner" == "$version_str" && "$version_str" != "$current_stored_version" ]]; then
+                  echo "    Replacing '${chosen_package_entries[$conflict_key]}' (Version: $current_stored_version) with '$original_dep_entry' (Version: $version_str)"
+                  chosen_package_versions[$conflict_key]="$version_str"
+                  chosen_package_entries[$conflict_key]="$original_dep_entry"
                 else
-                  echo "  Adding $dep (first occurrence of $full_base)"
-                  package_versions[$full_base]="$version"
-                  FILTERED_DEPS="$FILTERED_DEPS $dep"
+                  echo "    Keeping existing: '${chosen_package_entries[$conflict_key]}' (Version: $current_stored_version) over '$original_dep_entry' (Version: $version_str)"
                 fi
-              else
-                # No version number detected, add as-is
-                FILTERED_DEPS="$FILTERED_DEPS $dep"
               fi
             done
+            IFS="$OLD_IFS" # Restore IFS
 
-            # Clean up extra spaces
-            ALL_DEPENDENCIES=$(echo "$FILTERED_DEPS" | xargs)
-            echo "After version filtering: $ALL_DEPENDENCIES"
-
-            echo "Fetching list of all available packages from repositories..."
-            ALL_AVAILABLE_PACKAGES_OUTPUT=$(docker exec haiku-vm vmshell "pkgman search -a | sed s/^........//g | cut -d \" \" -f 1")
-            declare -A all_available_packages_map
-            while IFS= read -r pkg_name; do
-                # Trim whitespace from package name, just in case
-                trimmed_pkg_name=$(echo "$pkg_name" | xargs)
-                if [ -n "$trimmed_pkg_name" ]; then
-                    all_available_packages_map["$trimmed_pkg_name"]=1
-                fi
-            done <<< "$ALL_AVAILABLE_PACKAGES_OUTPUT"
-            echo "Found ${#all_available_packages_map[@]} available packages in repositories."
-
-            # Filter dependencies not available in repositories
-            DEPENDENCIES=""
-            for dep in $ALL_DEPENDENCIES; do
-              # Check if this dependency is available in the map
-              if [[ -n "${all_available_packages_map[$dep]}" ]]; then
-                DEPENDENCIES="$DEPENDENCIES $dep"
-              else
-                echo "Warning: Dependency '$dep' not found in available packages, skipping."
-              fi
-            done
-            DEPENDENCIES=$(echo "$DEPENDENCIES" | xargs)  # Clean up extra spaces
-            echo "Calculated dependencies to install: $DEPENDENCIES"
+            if [ ${#chosen_package_entries[@]} -gt 0 ]; then
+              for key in "${!chosen_package_entries[@]}"; do
+                RESOLVED_DEPENDENCIES_LIST+=("${chosen_package_entries[$key]}")
+              done
+            fi
+            echo "After version conflict resolution, chosen dependencies:"
+            printf "  %s\n" "${RESOLVED_DEPENDENCIES_LIST[@]}" # Print each on a new line for clarity
           fi
 
-          if [ -z "$DEPENDENCIES" ]; then
-            echo "No external dependencies to install (all dependencies are being built or none found)"
+          # Filter resolved dependencies against available repository packages
+          echo "Fetching list of all available packages from repositories..."
+          ALL_RAW_AVAILABLE_PACKAGES_OUTPUT=$(docker exec haiku-vm vmshell "pkgman search -a | sed s/^........//g | cut -d \" \" -f 1")
+          declare -A all_available_packages_map
+          while IFS= read -r pkg_name_full_raw; do
+              local_trimmed_pkg_name_full=$(echo "$pkg_name_full_raw" | xargs) # Trim whitespace, gives name-version-release
+              if [ -n "$local_trimmed_pkg_name_full" ]; then
+                  # Strip release number to get name-version, e.g., "foo-1.2.3-1" becomes "foo-1.2.3"
+                  local_pkg_name_nv=$(echo "$local_trimmed_pkg_name_full" | sed 's/^\(.*\)-[0-9]\+$/\1/')
+                  all_available_packages_map["$local_pkg_name_nv"]=1 # Store by name-version
+              fi
+          done <<< "$ALL_RAW_AVAILABLE_PACKAGES_OUTPUT"
+          echo "Found ${#all_available_packages_map[@]} available packages in repositories."
+
+          FINAL_INSTALL_LIST=()
+          if [ ${#RESOLVED_DEPENDENCIES_LIST[@]} -gt 0 ]; then
+            echo "Filtering resolved dependencies against available repository packages..."
+            for dep_to_check in "${RESOLVED_DEPENDENCIES_LIST[@]}"; do
+              trimmed_dep_to_check=$(echo "$dep_to_check" | xargs)
+              # trimmed_dep_to_check should now be clean name-version (e.g., openexr3.2_devel-3.2.4)
+              if [[ -n "${all_available_packages_map[$trimmed_dep_to_check]}" ]]; then # Check if this name-version exists in the map
+                FINAL_INSTALL_LIST+=("$trimmed_dep_to_check") # Add the name-version string for pkgman to install
+              else
+                echo "Warning: Dependency '$trimmed_dep_to_check' (chosen after conflict resolution) not found in available packages, skipping."
+              fi
+            done
+          fi
+
+          if [ ${#FINAL_INSTALL_LIST[@]} -eq 0 ]; then
+            echo "No external dependencies to install (either none found, all are built locally, or all filtered out)."
+            DEPENDENCIES=""
           else
-            echo "Final filtered dependency list: $DEPENDENCIES"
+            DEPENDENCIES=$(echo "${FINAL_INSTALL_LIST[@]}" | xargs) # Space separated string
             echo "Installing calculated dependencies in VM..."
             docker exec haiku-vm vmshell "pkgman install -y $DEPENDENCIES" || {
               echo "Warning: Some dependencies failed to install, continuing with build..."
