@@ -126,7 +126,7 @@ jobs:
           if [ -d "changed_ports_temp" ] && [ "$(ls -A changed_ports_temp)" ]; then
             tar -czf changed_ports.tar.gz -C changed_ports_temp .
             echo "Created changed_ports.tar.gz with contents:"
-            tar -tzf changed_ports.tar.gz | head -n 20
+            tar -tzf changed_ports.tar.gz
           else
             echo "No port directories found to package"
             tar -czf changed_ports.tar.gz --files-from /dev/null
@@ -175,8 +175,6 @@ jobs:
           echo "Looking for repository directory:"
           if [ -d "repository" ]; then
             echo "✓ repository directory found"
-            echo "Contents:"
-            ls -la repository/ | head -n 10
           else
             echo "✗ repository directory NOT found"
           fi
@@ -209,7 +207,7 @@ jobs:
         run: |
           echo "Installing basic build tools in VM (dependencies will be calculated later)..."
           docker exec haiku-vm vmshell pkgman install -y \
-            gcc binutils make cmake haikuporter
+            haikuporter
           echo "Basic build tools installation completed."
 
       - name: Transfer changed ports to VM
@@ -245,7 +243,6 @@ jobs:
             cat dependency-infos.tar.gz | docker exec -i haiku-vm vmshell "mkdir -p /boot/home/haikuports/repository && cat > /boot/home/haikuports/dependency-infos.tar.gz"
             docker exec haiku-vm vmshell "cd /boot/home/haikuports && tar -xzf dependency-infos.tar.gz -C repository"
             echo "Transferred and extracted dependency-infos.tar.gz to /boot/home/haikuports/repository in VM."
-            docker exec haiku-vm vmshell "echo 'Contents of /boot/home/haikuports/repository:'; ls -la /boot/home/haikuports/repository"
           else
             echo "✗ repository directory not found on runner. No .DependencyInfo files to transfer."
             docker exec haiku-vm vmshell "mkdir -p /boot/home/haikuports/repository"
