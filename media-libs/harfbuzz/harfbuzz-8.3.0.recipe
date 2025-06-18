@@ -100,10 +100,10 @@ BUILD_PREREQUIRES="
 	pygments_python310
 	"
 
-defineDebugInfoPackage harfbuzz$secondaryArchSuffix \
-	"$libDir"/libharfbuzz.so.$libVersion \
-	"$libDir"/libharfbuzz-icu.so.$libVersion \
-	"$libDir"/libharfbuzz-subset.so.$libVersion
+#defineDebugInfoPackage harfbuzz$secondaryArchSuffix \
+#	"$libDir"/libharfbuzz.so.$libVersion \
+#	"$libDir"/libharfbuzz-icu.so.$libVersion \
+#	"$libDir"/libharfbuzz-subset.so.$libVersion
 
 BUILD()
 {
@@ -117,7 +117,7 @@ BUILD()
 		--datadir=$dataDir \
 		--bindir="$commandBinDir" \
 		-Dcairo=disabled \
-		-Dglib=disabled \
+		-Dglib=enabled \
 		-Dicu=enabled \
 		-Dintrospection=enabled \
 		-Dgraphite2=enabled \
