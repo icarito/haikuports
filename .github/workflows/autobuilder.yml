@@ -349,7 +349,7 @@ jobs:
             echo 'Reading list of changed packages' && \
             RECIPE_ARGS='${{ needs.prepare-build.outputs.changed_recipes_space_separated }}' && \
             echo \"Changed packages: \$RECIPE_ARGS\" && \
-            if haikuporter \$RECIPE_ARGS -j4 -G --no-repository-update --missing-dependencies; then \
+            if haikuporter \$RECIPE_ARGS -j4 -G --no-repository-update --get-dependencies --missing-dependencies; then \
               echo \"✓ HaikuPorter build completed successfully.\" ; \
             else \
               BUILD_FAILURE_CODE=$? ; \
