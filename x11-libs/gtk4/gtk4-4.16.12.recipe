@@ -11,7 +11,9 @@ CHECKSUM_SHA256="ef31bdbd6f082c4401634a20c850b0050c9bf252ef1e079764ee95a2a0c4c95
 SOURCE_DIR="gtk-$portVersion"
 PATCHES="0001-gdk-wayland-Define-missing-BTN_-constants.patch
 0002-gdk-wayland-Copy-strsep-from-musl.patch
-0003-gdk-wayland-Use-forgotten-include-guards.patch"
+0003-gdk-wayland-Use-forgotten-include-guards.patch
+0004-revert-upstream-commit.patch
+"
 ADDITIONAL_FILES="compile-schemas.sh"
 
 ARCHITECTURES="all !x86_gcc2"
